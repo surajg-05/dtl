@@ -113,9 +113,78 @@ body {
   background: #a1a1a1;
 }
 
+/* Star rating animation */
+.star-hover {
+  transition: transform 0.15s ease-in-out;
+}
+
+.star-hover:hover {
+  transform: scale(1.2);
+}
+
+/* Modal overlay */
+.modal-overlay {
+  backdrop-filter: blur(4px);
+}
+
+/* Trust badge styles */
+.trust-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* History card animation */
+.history-card {
+  transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+}
+
+.history-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* Safe completion button pulse */
+@keyframes pulse-green {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(34, 197, 94, 0);
+  }
+}
+
+.pulse-green {
+  animation: pulse-green 2s infinite;
+}
+
+/* Rating stars */
+.rating-star {
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+}
+
+.rating-star:hover {
+  transform: scale(1.15);
+}
+
+.rating-star.active {
+  color: #fbbf24;
+  fill: #fbbf24;
+}
+
 /* Responsive */
 @media (max-width: 640px) {
   .card {
     padding: 1rem;
+  }
+  
+  .nav-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  
+  .nav-scroll::-webkit-scrollbar {
+    display: none;
   }
 }
