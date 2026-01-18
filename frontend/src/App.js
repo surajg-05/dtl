@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { format, formatDistanceToNow, parseISO, addHours } from 'date-fns';
+import { format, formatDistanceToNow, parseISO } from 'date-fns';
 import {
   Car, MapPin, Clock, Users, DollarSign, Search, Plus, LogOut,
   User, Check, X, AlertTriangle, Repeat, Zap, Navigation, ChevronRight,
-  Filter, Star, Calendar
+  Filter, Star, Calendar, Shield, ShieldCheck, ShieldAlert, History,
+  ThumbsUp, MessageSquare, Award
 } from 'lucide-react';
 import './App.css';
 
@@ -28,11 +29,22 @@ const useAuth = () => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  const fetchUserInfo = async () => {
+    try {
+      const response = await api.get('/api/auth/me');
+      setUser(response.data);
+      localStorage.setItem('user', JSON.stringify(response.data));
+    } catch (err) {
+      console.error('Failed to fetch user info:', err);
+    }
+  };
+
   useEffect(() => {
     const token = localStorage.getItem('token');
     const userData = localStorage.getItem('user');
     if (token && userData) {
       setUser(JSON.parse(userData));
+      fetchUserInfo();
     }
     setLoading(false);
   }, []);
@@ -59,7 +71,7 @@ const useAuth = () => {
     setUser(null);
   };
 
-  return { user, loading, login, signup, logout };
+  return { user, loading, login, signup, logout, fetchUserInfo };
 };
 
 // Components
@@ -71,6 +83,12 @@ const Badge = ({ variant, children, className = '' }) => {
     pending: 'bg-yellow-100 text-yellow-800 border-yellow-200',
     accepted: 'bg-green-100 text-green-800 border-green-200',
     rejected: 'bg-red-100 text-red-800 border-red-200',
+    completed: 'bg-blue-100 text-blue-800 border-blue-200',
+    cancelled: 'bg-gray-100 text-gray-800 border-gray-200',
+    trusted: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+    new_user: 'bg-sky-100 text-sky-800 border-sky-200',
+    low_rating: 'bg-orange-100 text-orange-800 border-orange-200',
+    regular: 'bg-slate-100 text-slate-700 border-slate-200',
     default: 'bg-gray-100 text-gray-800 border-gray-200'
   };
 
@@ -86,6 +104,198 @@ const LoadingSpinner = () => (
     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
   </div>
 );
+
+// Trust Badge Component
+const TrustBadge = ({ trust, showRating = true, size = 'md' }) => {
+  if (!trust) return null;
+  
+  const { trustLabel, avgRating, totalRides, ratingCount } = trust;
+  
+  const labelConfig = {
+    trusted: { icon: ShieldCheck, text: 'Trusted', color: 'text-emerald-600' },
+    new_user: { icon: Shield, text: 'New User', color: 'text-sky-600' },
+    low_rating: { icon: ShieldAlert, text: 'Low Rating', color: 'text-orange-600' },
+    regular: { icon: Shield, text: 'Regular', color: 'text-slate-600' }
+  };
+
+  const config = labelConfig[trustLabel] || labelConfig.regular;
+  const Icon = config.icon;
+  
+  const sizeClasses = size === 'sm' ? 'text-xs' : 'text-sm';
+
+  return (
+    <div className={`flex items-center gap-2 ${sizeClasses}`} data-testid="trust-badge">
+      <Badge variant={trustLabel}>
+        <Icon className="w-3 h-3 inline mr-1" />
+        {config.text}
+      </Badge>
+      {showRating && ratingCount > 0 && (
+        <span className="flex items-center gap-1 text-gray-600">
+          <Star className="w-3 h-3 text-yellow-500 fill-yellow-500" />
+          {avgRating} ({ratingCount})
+        </span>
+      )}
+      {totalRides > 0 && (
+        <span className="text-gray-500">
+          {totalRides} ride{totalRides !== 1 ? 's' : ''}
+        </span>
+      )}
+    </div>
+  );
+};
+
+// Star Rating Input Component
+const StarRatingInput = ({ rating, setRating, size = 'lg' }) => {
+  const [hover, setHover] = useState(0);
+  const sizeClass = size === 'lg' ? 'w-8 h-8' : 'w-5 h-5';
+  
+  return (
+    <div className="flex gap-1" data-testid="star-rating-input">
+      {[1, 2, 3, 4, 5].map((star) => (
+        <button
+          key={star}
+          type="button"
+          onClick={() => setRating(star)}
+          onMouseEnter={() => setHover(star)}
+          onMouseLeave={() => setHover(0)}
+          className="focus:outline-none transition-transform hover:scale-110"
+          data-testid={`star-${star}`}
+        >
+          <Star
+            className={`${sizeClass} ${
+              star <= (hover || rating)
+                ? 'text-yellow-400 fill-yellow-400'
+                : 'text-gray-300'
+            }`}
+          />
+        </button>
+      ))}
+    </div>
+  );
+};
+
+// Rating Modal Component
+const RatingModal = ({ isOpen, onClose, rideId, userToRate, onSubmit }) => {
+  const [rating, setRating] = useState(0);
+  const [feedback, setFeedback] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSubmit = async () => {
+    if (rating === 0) {
+      setError('Please select a rating');
+      return;
+    }
+    
+    setLoading(true);
+    setError('');
+    
+    try {
+      await onSubmit({
+        ride_id: rideId,
+        rated_user_id: userToRate.userId,
+        rating,
+        feedback: feedback.trim() || null
+      });
+      setRating(0);
+      setFeedback('');
+      onClose();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to submit rating');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" data-testid="rating-modal">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+        <h3 className="text-xl font-bold text-gray-900 mb-2">Rate Your Experience</h3>
+        <p className="text-gray-600 mb-6">How was your ride with {userToRate?.userName}?</p>
+        
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4" data-testid="rating-error">
+            {error}
+          </div>
+        )}
+        
+        <div className="flex justify-center mb-6">
+          <StarRatingInput rating={rating} setRating={setRating} />
+        </div>
+        
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            <MessageSquare className="w-4 h-4 inline mr-1" />
+            Feedback (optional)
+          </label>
+          <textarea
+            value={feedback}
+            onChange={(e) => setFeedback(e.target.value)}
+            className="input-field h-24 resize-none"
+            placeholder="Share your experience..."
+            maxLength={500}
+            data-testid="rating-feedback-input"
+          />
+        </div>
+        
+        <div className="flex gap-3">
+          <button
+            onClick={handleSubmit}
+            disabled={loading || rating === 0}
+            className="flex-1 btn-primary py-3 disabled:opacity-50"
+            data-testid="submit-rating-btn"
+          >
+            {loading ? 'Submitting...' : 'Submit Rating'}
+          </button>
+          <button
+            onClick={onClose}
+            className="btn-secondary py-3"
+            data-testid="cancel-rating-btn"
+          >
+            Later
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Safe Completion Button Component
+const SafeCompletionButton = ({ rideId, onConfirm, confirmed }) => {
+  const [loading, setLoading] = useState(false);
+
+  const handleConfirm = async () => {
+    setLoading(true);
+    try {
+      await onConfirm(rideId);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (confirmed) {
+    return (
+      <div className="flex items-center gap-2 text-green-600 bg-green-50 px-3 py-2 rounded-lg" data-testid="safe-confirmed">
+        <ShieldCheck className="w-5 h-5" />
+        <span className="font-medium">Reached Safely</span>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={handleConfirm}
+      disabled={loading}
+      className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50"
+      data-testid="confirm-safe-btn"
+    >
+      <ThumbsUp className="w-5 h-5" />
+      {loading ? 'Confirming...' : 'Reached Safely'}
+    </button>
+  );
+};
 
 // Auth Page
 const AuthPage = ({ onLogin }) => {
@@ -320,7 +530,12 @@ const RideCard = ({ ride, onRequest, userRole, showRequestBtn = true }) => {
           <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
             <User className="w-4 h-4 text-blue-600" />
           </div>
-          <span className="text-sm text-gray-700">{ride.driverName}</span>
+          <div>
+            <span className="text-sm text-gray-700 block">{ride.driverName}</span>
+            {ride.driverTrust && (
+              <TrustBadge trust={ride.driverTrust} size="sm" />
+            )}
+          </div>
         </div>
         
         {showRequestBtn && userRole === 'rider' && ride.availableSeats > 0 && (
@@ -678,7 +893,7 @@ const PostRideForm = ({ pickupPoints, onSubmit, onCancel }) => {
 };
 
 // Request Card Component
-const RequestCard = ({ request, onAccept, onReject, isDriverView = false }) => {
+const RequestCard = ({ request, onAccept, onReject, isDriverView = false, onRate, onConfirmSafe }) => {
   const [loading, setLoading] = useState(false);
 
   const handleAction = async (action) => {
@@ -694,10 +909,13 @@ const RequestCard = ({ request, onAccept, onReject, isDriverView = false }) => {
     }
   };
 
+  const showRatingPrompt = request.pendingRating && request.ride?.status === 'completed';
+  const showSafeConfirm = request.status === 'accepted' && request.ride?.status === 'completed' && !request.safelyConfirmed;
+
   return (
     <div className={`card ${request.isUrgent ? 'ring-2 ring-red-500' : ''}`} data-testid={`request-card-${request.id}`}>
       <div className="flex items-start justify-between">
-        <div>
+        <div className="flex-1">
           <div className="flex items-center gap-2 mb-2">
             {request.isUrgent && (
               <Badge variant="urgent">
@@ -706,10 +924,21 @@ const RequestCard = ({ request, onAccept, onReject, isDriverView = false }) => {
               </Badge>
             )}
             <Badge variant={request.status}>{request.status}</Badge>
+            {request.ride?.status === 'completed' && (
+              <Badge variant="completed">
+                <Check className="w-3 h-3 inline mr-1" />
+                Completed
+              </Badge>
+            )}
           </div>
           
           {isDriverView ? (
-            <p className="font-medium text-gray-900">{request.riderName}</p>
+            <div>
+              <p className="font-medium text-gray-900">{request.riderName}</p>
+              {request.riderTrust && (
+                <TrustBadge trust={request.riderTrust} size="sm" />
+              )}
+            </div>
           ) : (
             <div className="text-sm text-gray-600">
               <p><span className="font-medium">Route:</span> {request.ride?.source} → {request.ride?.destination}</p>
@@ -746,6 +975,142 @@ const RequestCard = ({ request, onAccept, onReject, isDriverView = false }) => {
           </div>
         )}
       </div>
+
+      {/* Show actions for completed rides */}
+      {(showRatingPrompt || showSafeConfirm) && (
+        <div className="mt-4 pt-4 border-t border-gray-100 flex flex-wrap gap-3">
+          {showSafeConfirm && (
+            <SafeCompletionButton
+              rideId={request.rideId}
+              onConfirm={onConfirmSafe}
+              confirmed={request.safelyConfirmed}
+            />
+          )}
+          {showRatingPrompt && (
+            <button
+              onClick={() => onRate(request.rideId, request.pendingRating)}
+              className="flex items-center gap-2 bg-yellow-100 text-yellow-800 px-4 py-2 rounded-lg hover:bg-yellow-200 transition-colors"
+              data-testid="rate-driver-btn"
+            >
+              <Star className="w-5 h-5" />
+              Rate Driver
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Ride History Card Component
+const HistoryCard = ({ ride }) => {
+  const departureTime = parseISO(ride.departureTime);
+
+  return (
+    <div className="card" data-testid={`history-card-${ride.id}`}>
+      <div className="flex items-start justify-between mb-4">
+        <div className="flex-1">
+          <div className="flex items-center gap-2 mb-2">
+            <Badge variant={ride.status}>{ride.status}</Badge>
+            <Badge variant={ride.role === 'driver' ? 'recurring' : 'recommended'}>
+              {ride.role === 'driver' ? 'As Driver' : 'As Rider'}
+            </Badge>
+            {ride.safelyConfirmed && (
+              <Badge variant="trusted">
+                <ShieldCheck className="w-3 h-3 inline mr-1" />
+                Safe
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mb-1">
+            <div className="w-2 h-2 rounded-full bg-green-500"></div>
+            <span className="font-medium text-gray-900">{ride.source}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-red-500"></div>
+            <span className="font-medium text-gray-900">{ride.destination}</span>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-lg font-bold text-blue-600">
+            ${ride.role === 'driver' ? ride.estimatedCost : ride.costPaid}
+          </div>
+          <div className="text-xs text-gray-500">
+            {ride.role === 'driver' ? 'total earned' : 'paid'}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between text-sm text-gray-600">
+        <div className="flex items-center gap-2">
+          <Clock className="w-4 h-4" />
+          <span>{format(departureTime, 'MMM d, yyyy h:mm a')}</span>
+        </div>
+        {ride.role === 'driver' && (
+          <div className="flex items-center gap-2">
+            <Users className="w-4 h-4" />
+            <span>{ride.ridersCount} rider{ride.ridersCount !== 1 ? 's' : ''}</span>
+          </div>
+        )}
+        {ride.role === 'rider' && ride.driverName && (
+          <div className="flex items-center gap-2">
+            <User className="w-4 h-4" />
+            <span>{ride.driverName}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// User Profile Card Component
+const ProfileCard = ({ user, onLogout }) => {
+  return (
+    <div className="card" data-testid="profile-card">
+      <div className="flex items-center gap-4 mb-6">
+        <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center">
+          <User className="w-8 h-8 text-blue-600" />
+        </div>
+        <div>
+          <h2 className="text-xl font-bold text-gray-900">{user.name}</h2>
+          <p className="text-gray-600 capitalize">{user.role}</p>
+        </div>
+      </div>
+
+      {user.avgRating !== undefined && (
+        <div className="grid grid-cols-3 gap-4 mb-6">
+          <div className="text-center p-3 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-center gap-1 mb-1">
+              <Star className="w-5 h-5 text-yellow-500 fill-yellow-500" />
+              <span className="text-xl font-bold text-gray-900">{user.avgRating || '-'}</span>
+            </div>
+            <p className="text-xs text-gray-500">Rating</p>
+          </div>
+          <div className="text-center p-3 bg-gray-50 rounded-lg">
+            <div className="text-xl font-bold text-gray-900">{user.totalRides || 0}</div>
+            <p className="text-xs text-gray-500">Rides</p>
+          </div>
+          <div className="text-center p-3 bg-gray-50 rounded-lg">
+            <div className="text-xl font-bold text-gray-900">{user.ratingCount || 0}</div>
+            <p className="text-xs text-gray-500">Reviews</p>
+          </div>
+        </div>
+      )}
+
+      {user.trustLabel && (
+        <div className="mb-6">
+          <TrustBadge trust={user} showRating={false} />
+        </div>
+      )}
+
+      <button
+        onClick={onLogout}
+        className="w-full btn-secondary flex items-center justify-center gap-2"
+        data-testid="profile-logout-btn"
+      >
+        <LogOut className="w-5 h-5" />
+        Logout
+      </button>
     </div>
   );
 };
@@ -753,13 +1118,21 @@ const RequestCard = ({ request, onAccept, onReject, isDriverView = false }) => {
 // Main App Component
 function App() {
   const auth = useAuth();
-  const [view, setView] = useState('rides'); // rides, myRides, requests, post
+  const [view, setView] = useState('rides'); // rides, myRides, requests, post, history, profile
   const [rides, setRides] = useState([]);
   const [myRides, setMyRides] = useState([]);
   const [myRequests, setMyRequests] = useState([]);
+  const [history, setHistory] = useState([]);
   const [pickupPoints, setPickupPoints] = useState([]);
   const [loading, setLoading] = useState(false);
   const [notification, setNotification] = useState(null);
+  
+  // Rating modal state
+  const [ratingModal, setRatingModal] = useState({
+    isOpen: false,
+    rideId: null,
+    userToRate: null
+  });
 
   // Fetch pickup points
   const fetchPickupPoints = useCallback(async () => {
@@ -809,6 +1182,17 @@ function App() {
       console.error('Failed to fetch my requests:', err);
     }
   }, []);
+
+  // Fetch ride history
+  const fetchHistory = useCallback(async () => {
+    try {
+      const endpoint = auth.user?.role === 'driver' ? '/api/history/driver' : '/api/history/rider';
+      const response = await api.get(endpoint);
+      setHistory(response.data.history);
+    } catch (err) {
+      console.error('Failed to fetch history:', err);
+    }
+  }, [auth.user?.role]);
 
   // Show notification
   const showNotification = (message, type = 'success') => {
@@ -865,6 +1249,50 @@ function App() {
     }
   };
 
+  // Submit rating
+  const submitRating = async (ratingData) => {
+    try {
+      await api.post('/api/ratings', ratingData);
+      showNotification('Rating submitted successfully!');
+      fetchMyRequests();
+      fetchMyRides();
+      auth.fetchUserInfo();
+    } catch (err) {
+      throw err;
+    }
+  };
+
+  // Confirm safe completion
+  const confirmSafeCompletion = async (rideId) => {
+    try {
+      await api.post('/api/safe-completion', { ride_id: rideId });
+      showNotification('Safe arrival confirmed!');
+      fetchMyRequests();
+    } catch (err) {
+      showNotification(err.response?.data?.detail || 'Failed to confirm', 'error');
+    }
+  };
+
+  // Update ride status
+  const updateRideStatus = async (rideId, status) => {
+    try {
+      await api.patch(`/api/rides/${rideId}/status?status=${status}`);
+      showNotification(`Ride marked as ${status}!`);
+      fetchMyRides();
+    } catch (err) {
+      showNotification(err.response?.data?.detail || 'Failed to update status', 'error');
+    }
+  };
+
+  // Open rating modal
+  const openRatingModal = (rideId, userToRate) => {
+    setRatingModal({
+      isOpen: true,
+      rideId,
+      userToRate
+    });
+  };
+
   // Auth handlers
   const handleLogin = async (email, password, name, role, isSignup = false) => {
     if (isSignup) {
@@ -908,15 +1336,19 @@ function App() {
           </div>
           
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
+            <button
+              onClick={() => { setView('profile'); auth.fetchUserInfo(); }}
+              className="flex items-center gap-2 hover:bg-gray-100 p-2 rounded-lg transition-colors"
+              data-testid="profile-btn"
+            >
               <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
                 <User className="w-4 h-4 text-blue-600" />
               </div>
-              <div>
+              <div className="hidden sm:block text-left">
                 <p className="text-sm font-medium text-gray-900">{auth.user.name}</p>
                 <p className="text-xs text-gray-500 capitalize">{auth.user.role}</p>
               </div>
-            </div>
+            </button>
             <button
               onClick={auth.logout}
               className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
@@ -940,13 +1372,22 @@ function App() {
         </div>
       )}
 
+      {/* Rating Modal */}
+      <RatingModal
+        isOpen={ratingModal.isOpen}
+        onClose={() => setRatingModal({ isOpen: false, rideId: null, userToRate: null })}
+        rideId={ratingModal.rideId}
+        userToRate={ratingModal.userToRate}
+        onSubmit={submitRating}
+      />
+
       {/* Navigation */}
       <nav className="bg-white border-b">
         <div className="max-w-6xl mx-auto px-4">
-          <div className="flex gap-1">
+          <div className="flex gap-1 overflow-x-auto">
             <button
               onClick={() => { setView('rides'); fetchRides(); }}
-              className={`px-4 py-3 font-medium transition-colors border-b-2 ${
+              className={`px-4 py-3 font-medium transition-colors border-b-2 whitespace-nowrap ${
                 view === 'rides' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
               data-testid="nav-rides"
@@ -959,7 +1400,7 @@ function App() {
               <>
                 <button
                   onClick={() => { setView('myRides'); fetchMyRides(); }}
-                  className={`px-4 py-3 font-medium transition-colors border-b-2 ${
+                  className={`px-4 py-3 font-medium transition-colors border-b-2 whitespace-nowrap ${
                     view === 'myRides' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
                   }`}
                   data-testid="nav-my-rides"
@@ -969,7 +1410,7 @@ function App() {
                 </button>
                 <button
                   onClick={() => setView('post')}
-                  className={`px-4 py-3 font-medium transition-colors border-b-2 ${
+                  className={`px-4 py-3 font-medium transition-colors border-b-2 whitespace-nowrap ${
                     view === 'post' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
                   }`}
                   data-testid="nav-post-ride"
@@ -983,7 +1424,7 @@ function App() {
             {auth.user.role === 'rider' && (
               <button
                 onClick={() => { setView('requests'); fetchMyRequests(); }}
-                className={`px-4 py-3 font-medium transition-colors border-b-2 ${
+                className={`px-4 py-3 font-medium transition-colors border-b-2 whitespace-nowrap ${
                   view === 'requests' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
                 data-testid="nav-my-requests"
@@ -992,6 +1433,28 @@ function App() {
                 My Requests
               </button>
             )}
+
+            <button
+              onClick={() => { setView('history'); fetchHistory(); }}
+              className={`px-4 py-3 font-medium transition-colors border-b-2 whitespace-nowrap ${
+                view === 'history' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+              data-testid="nav-history"
+            >
+              <History className="w-4 h-4 inline mr-2" />
+              History
+            </button>
+
+            <button
+              onClick={() => { setView('profile'); auth.fetchUserInfo(); }}
+              className={`px-4 py-3 font-medium transition-colors border-b-2 whitespace-nowrap ${
+                view === 'profile' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+              data-testid="nav-profile"
+            >
+              <User className="w-4 h-4 inline mr-2" />
+              Profile
+            </button>
           </div>
         </div>
       </nav>
@@ -1060,6 +1523,8 @@ function App() {
                     ride={ride}
                     onAccept={acceptRequest}
                     onReject={rejectRequest}
+                    onUpdateStatus={updateRideStatus}
+                    onRate={openRatingModal}
                   />
                 ))}
               </div>
@@ -1088,7 +1553,12 @@ function App() {
             ) : (
               <div className="space-y-4">
                 {myRequests.map((request) => (
-                  <RequestCard key={request.id} request={request} />
+                  <RequestCard
+                    key={request.id}
+                    request={request}
+                    onRate={openRatingModal}
+                    onConfirmSafe={confirmSafeCompletion}
+                  />
                 ))}
               </div>
             )}
@@ -1103,13 +1573,44 @@ function App() {
             onCancel={() => setView('myRides')}
           />
         )}
+
+        {/* History View */}
+        {view === 'history' && (
+          <div>
+            <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
+              <History className="w-6 h-6 text-blue-600" />
+              Ride History
+            </h2>
+            
+            {history.length === 0 ? (
+              <div className="card text-center py-12">
+                <History className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                <h3 className="text-lg font-medium text-gray-900 mb-2">No ride history yet</h3>
+                <p className="text-gray-500">Your completed and cancelled rides will appear here</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {history.map((ride) => (
+                  <HistoryCard key={ride.id} ride={ride} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Profile View */}
+        {view === 'profile' && (
+          <div className="max-w-md mx-auto">
+            <ProfileCard user={auth.user} onLogout={auth.logout} />
+          </div>
+        )}
       </main>
     </div>
   );
 }
 
 // Driver Ride Card with request management
-const DriverRideCard = ({ ride, onAccept, onReject }) => {
+const DriverRideCard = ({ ride, onAccept, onReject, onUpdateStatus, onRate }) => {
   const [requests, setRequests] = useState([]);
   const [showRequests, setShowRequests] = useState(false);
   const [loadingRequests, setLoadingRequests] = useState(false);
@@ -1134,8 +1635,8 @@ const DriverRideCard = ({ ride, onAccept, onReject }) => {
   };
 
   const departureTime = parseISO(ride.departureTime);
-  const pendingCount = requests.filter(r => r.status === 'pending').length;
   const urgentCount = requests.filter(r => r.isUrgent && r.status === 'pending').length;
+  const hasPendingRatings = ride.pendingRatings && ride.pendingRatings.length > 0;
 
   return (
     <div className="card" data-testid={`driver-ride-card-${ride.id}`}>
@@ -1182,6 +1683,61 @@ const DriverRideCard = ({ ride, onAccept, onReject }) => {
           </div>
         )}
       </div>
+
+      {/* Status Actions */}
+      {ride.status === 'posted' && (
+        <div className="flex gap-2 mb-4">
+          <button
+            onClick={() => onUpdateStatus(ride.id, 'in_progress')}
+            className="btn-primary text-sm"
+            data-testid="start-ride-btn"
+          >
+            Start Ride
+          </button>
+          <button
+            onClick={() => onUpdateStatus(ride.id, 'cancelled')}
+            className="btn-secondary text-sm"
+            data-testid="cancel-ride-btn"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {ride.status === 'in_progress' && (
+        <div className="mb-4">
+          <button
+            onClick={() => onUpdateStatus(ride.id, 'completed')}
+            className="btn-primary text-sm bg-green-600 hover:bg-green-700"
+            data-testid="complete-ride-btn"
+          >
+            <Check className="w-4 h-4 inline mr-1" />
+            Mark as Completed
+          </button>
+        </div>
+      )}
+
+      {/* Pending Ratings */}
+      {hasPendingRatings && (
+        <div className="mb-4 p-3 bg-yellow-50 rounded-lg border border-yellow-100">
+          <p className="text-sm font-medium text-yellow-800 mb-2 flex items-center gap-2">
+            <Star className="w-4 h-4" />
+            Rate your riders
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {ride.pendingRatings.map((rider) => (
+              <button
+                key={rider.userId}
+                onClick={() => onRate(ride.id, rider)}
+                className="text-sm bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full hover:bg-yellow-200 transition-colors"
+                data-testid={`rate-rider-${rider.userId}`}
+              >
+                Rate {rider.userName}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <button
         onClick={handleToggleRequests}
