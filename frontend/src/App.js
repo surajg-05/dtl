@@ -5,7 +5,8 @@ import {
   Car, MapPin, Clock, Users, DollarSign, Search, Plus, LogOut,
   User, Check, X, AlertTriangle, Repeat, Zap, Navigation, ChevronRight,
   Filter, Star, Calendar, Shield, ShieldCheck, ShieldAlert, History,
-  ThumbsUp, MessageSquare, Award
+  ThumbsUp, MessageSquare, Award, Leaf, TrendingUp, Target, Flame,
+  Trophy, BookOpen, GraduationCap, Tag, BarChart3, ChevronDown
 } from 'lucide-react';
 import './App.css';
 
@@ -57,8 +58,12 @@ const useAuth = () => {
     return response.data;
   };
 
-  const signup = async (email, password, name, role) => {
-    const response = await api.post('/api/auth/signup', { email, password, name, role });
+  const signup = async (email, password, name, role, branch, academicYear) => {
+    const response = await api.post('/api/auth/signup', { 
+      email, password, name, role,
+      branch: branch || null,
+      academic_year: academicYear || null
+    });
     localStorage.setItem('token', response.data.access_token);
     localStorage.setItem('user', JSON.stringify(response.data.user));
     setUser(response.data.user);
@@ -89,6 +94,9 @@ const Badge = ({ variant, children, className = '' }) => {
     new_user: 'bg-sky-100 text-sky-800 border-sky-200',
     low_rating: 'bg-orange-100 text-orange-800 border-orange-200',
     regular: 'bg-slate-100 text-slate-700 border-slate-200',
+    event: 'bg-indigo-100 text-indigo-800 border-indigo-200',
+    eco: 'bg-green-100 text-green-800 border-green-200',
+    streak: 'bg-orange-100 text-orange-800 border-orange-200',
     default: 'bg-gray-100 text-gray-800 border-gray-200'
   };
 
@@ -104,6 +112,26 @@ const LoadingSpinner = () => (
     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
   </div>
 );
+
+// Event Tag Badge Component
+const EventTagBadge = ({ eventTag }) => {
+  if (!eventTag) return null;
+  
+  return (
+    <span 
+      className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-full border"
+      style={{ 
+        backgroundColor: `${eventTag.color}20`,
+        borderColor: eventTag.color,
+        color: eventTag.color
+      }}
+      data-testid={`event-tag-${eventTag.id}`}
+    >
+      <span>{eventTag.icon}</span>
+      {eventTag.name}
+    </span>
+  );
+};
 
 // Trust Badge Component
 const TrustBadge = ({ trust, showRating = true, size = 'md' }) => {
@@ -297,6 +325,214 @@ const SafeCompletionButton = ({ rideId, onConfirm, confirmed }) => {
   );
 };
 
+// User Badge Display Component
+const UserBadgeDisplay = ({ badges, compact = false }) => {
+  if (!badges || badges.length === 0) return null;
+  
+  const displayBadges = compact ? badges.slice(0, 3) : badges;
+  
+  return (
+    <div className="flex flex-wrap gap-2" data-testid="user-badges">
+      {displayBadges.map((badge) => (
+        <div 
+          key={badge.id}
+          className="flex items-center gap-1 px-2 py-1 bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-full text-xs"
+          title={badge.description}
+        >
+          <span>{badge.icon}</span>
+          {!compact && <span className="font-medium text-amber-800">{badge.name}</span>}
+        </div>
+      ))}
+      {compact && badges.length > 3 && (
+        <span className="text-xs text-gray-500">+{badges.length - 3} more</span>
+      )}
+    </div>
+  );
+};
+
+// Streak Display Component
+const StreakDisplay = ({ streak }) => {
+  if (!streak || streak.currentStreak === 0) return null;
+  
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 bg-orange-50 border border-orange-200 rounded-lg" data-testid="streak-display">
+      <Flame className="w-5 h-5 text-orange-500" />
+      <div>
+        <span className="font-bold text-orange-700">{streak.currentStreak}</span>
+        <span className="text-orange-600 text-sm ml-1">day streak</span>
+      </div>
+      {streak.longestStreak > streak.currentStreak && (
+        <span className="text-xs text-orange-500 ml-2">Best: {streak.longestStreak}</span>
+      )}
+    </div>
+  );
+};
+
+// Eco Impact Card Component
+const EcoImpactCard = ({ stats }) => {
+  if (!stats) return null;
+  
+  const co2Saved = stats.co2SavedKg || 0;
+  const treesEquivalent = (co2Saved / 21).toFixed(1);
+  
+  return (
+    <div className="card bg-gradient-to-br from-green-50 to-emerald-50 border-green-200" data-testid="eco-impact-card">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-12 h-12 bg-green-500 rounded-xl flex items-center justify-center">
+          <Leaf className="w-6 h-6 text-white" />
+        </div>
+        <div>
+          <h3 className="font-bold text-green-800">Your Eco Impact</h3>
+          <p className="text-sm text-green-600">Making the planet greener</p>
+        </div>
+      </div>
+      
+      <div className="grid grid-cols-2 gap-4">
+        <div className="text-center p-3 bg-white bg-opacity-60 rounded-lg">
+          <div className="text-2xl font-bold text-green-700">{co2Saved.toFixed(1)}</div>
+          <div className="text-xs text-green-600">kg CO₂ Saved</div>
+        </div>
+        <div className="text-center p-3 bg-white bg-opacity-60 rounded-lg">
+          <div className="text-2xl font-bold text-green-700">{treesEquivalent}</div>
+          <div className="text-xs text-green-600">🌳 Trees Equivalent</div>
+        </div>
+        <div className="text-center p-3 bg-white bg-opacity-60 rounded-lg">
+          <div className="text-2xl font-bold text-green-700">{stats.totalDistanceKm || 0}</div>
+          <div className="text-xs text-green-600">km Shared</div>
+        </div>
+        <div className="text-center p-3 bg-white bg-opacity-60 rounded-lg">
+          <div className="text-2xl font-bold text-green-700">${stats.moneySaved?.toFixed(0) || 0}</div>
+          <div className="text-xs text-green-600">Money Saved</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Weekly Summary Card Component
+const WeeklySummaryCard = ({ summary }) => {
+  if (!summary) return null;
+  
+  return (
+    <div className="card bg-gradient-to-br from-blue-50 to-indigo-50 border-blue-200" data-testid="weekly-summary-card">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-12 h-12 bg-blue-500 rounded-xl flex items-center justify-center">
+          <BarChart3 className="w-6 h-6 text-white" />
+        </div>
+        <div>
+          <h3 className="font-bold text-blue-800">This Week</h3>
+          <p className="text-sm text-blue-600">Your 7-day activity</p>
+        </div>
+      </div>
+      
+      <div className="grid grid-cols-3 gap-3">
+        <div className="text-center p-3 bg-white bg-opacity-60 rounded-lg">
+          <div className="text-xl font-bold text-blue-700">{summary.totalRides}</div>
+          <div className="text-xs text-blue-600">Rides</div>
+        </div>
+        <div className="text-center p-3 bg-white bg-opacity-60 rounded-lg">
+          <div className="text-xl font-bold text-green-700">{summary.co2SavedKg?.toFixed(1)}</div>
+          <div className="text-xs text-green-600">kg CO₂</div>
+        </div>
+        <div className="text-center p-3 bg-white bg-opacity-60 rounded-lg">
+          <div className="text-xl font-bold text-amber-700">${summary.moneySaved?.toFixed(0)}</div>
+          <div className="text-xs text-amber-600">Saved</div>
+        </div>
+      </div>
+      
+      <div className="mt-4 pt-4 border-t border-blue-200 flex justify-between text-sm">
+        <span className="text-blue-600">Offered: {summary.ridesOffered}</span>
+        <span className="text-blue-600">Taken: {summary.ridesTaken}</span>
+        <span className="text-blue-600">{summary.distanceKm?.toFixed(0)} km</span>
+      </div>
+    </div>
+  );
+};
+
+// Statistics Dashboard Component
+const StatisticsDashboard = ({ user }) => {
+  const [statistics, setStatistics] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const response = await api.get('/api/users/me/statistics');
+        setStatistics(response.data);
+      } catch (err) {
+        console.error('Failed to fetch statistics:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchStats();
+  }, []);
+
+  if (loading) return <LoadingSpinner />;
+  if (!statistics) return null;
+
+  const { statistics: stats, streak, weeklySummary, badges } = statistics;
+
+  return (
+    <div className="space-y-6" data-testid="statistics-dashboard">
+      {/* Header Stats */}
+      <div className="card">
+        <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+          <TrendingUp className="w-6 h-6 text-blue-600" />
+          Your Statistics
+        </h2>
+        
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="text-center p-4 bg-blue-50 rounded-xl">
+            <Car className="w-6 h-6 text-blue-600 mx-auto mb-2" />
+            <div className="text-2xl font-bold text-gray-900">{stats.totalRides}</div>
+            <div className="text-sm text-gray-600">Total Rides</div>
+          </div>
+          <div className="text-center p-4 bg-purple-50 rounded-xl">
+            <Users className="w-6 h-6 text-purple-600 mx-auto mb-2" />
+            <div className="text-2xl font-bold text-gray-900">{stats.ridesTaken}</div>
+            <div className="text-sm text-gray-600">Rides Taken</div>
+          </div>
+          <div className="text-center p-4 bg-green-50 rounded-xl">
+            <Car className="w-6 h-6 text-green-600 mx-auto mb-2" />
+            <div className="text-2xl font-bold text-gray-900">{stats.ridesOffered}</div>
+            <div className="text-sm text-gray-600">Rides Offered</div>
+          </div>
+          <div className="text-center p-4 bg-amber-50 rounded-xl">
+            <Navigation className="w-6 h-6 text-amber-600 mx-auto mb-2" />
+            <div className="text-2xl font-bold text-gray-900">{stats.totalDistanceKm}</div>
+            <div className="text-sm text-gray-600">km Traveled</div>
+          </div>
+        </div>
+
+        {/* Streak */}
+        {streak && streak.currentStreak > 0 && (
+          <div className="mt-4">
+            <StreakDisplay streak={streak} />
+          </div>
+        )}
+      </div>
+
+      {/* Badges Section */}
+      {badges && badges.length > 0 && (
+        <div className="card">
+          <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+            <Trophy className="w-5 h-5 text-amber-500" />
+            Your Badges
+          </h3>
+          <UserBadgeDisplay badges={badges} />
+        </div>
+      )}
+
+      {/* Eco Impact & Weekly Summary */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <EcoImpactCard stats={stats} />
+        <WeeklySummaryCard summary={weeklySummary} />
+      </div>
+    </div>
+  );
+};
+
 // Auth Page
 const AuthPage = ({ onLogin }) => {
   const [isLogin, setIsLogin] = useState(true);
@@ -304,10 +540,25 @@ const AuthPage = ({ onLogin }) => {
     email: '',
     password: '',
     name: '',
-    role: 'rider'
+    role: 'rider',
+    branch: '',
+    academicYear: ''
   });
+  const [academicOptions, setAcademicOptions] = useState({ branches: [], academic_years: [] });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const fetchOptions = async () => {
+      try {
+        const response = await api.get('/api/academic-options');
+        setAcademicOptions(response.data);
+      } catch (err) {
+        console.error('Failed to fetch academic options:', err);
+      }
+    };
+    fetchOptions();
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -318,7 +569,15 @@ const AuthPage = ({ onLogin }) => {
       if (isLogin) {
         await onLogin(formData.email, formData.password);
       } else {
-        await onLogin(formData.email, formData.password, formData.name, formData.role, true);
+        await onLogin(
+          formData.email, 
+          formData.password, 
+          formData.name, 
+          formData.role, 
+          formData.branch,
+          formData.academicYear,
+          true
+        );
       }
     } catch (err) {
       setError(err.response?.data?.detail || 'An error occurred');
@@ -409,37 +668,77 @@ const AuthPage = ({ onLogin }) => {
           </div>
 
           {!isLogin && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">I want to</label>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setFormData({ ...formData, role: 'rider' })}
-                  className={`p-4 rounded-xl border-2 transition-all ${
-                    formData.role === 'rider'
-                      ? 'border-blue-600 bg-blue-50'
-                      : 'border-gray-200 hover:border-gray-300'
-                  }`}
-                  data-testid="rider-role-btn"
-                >
-                  <Users className="w-6 h-6 mx-auto mb-2 text-blue-600" />
-                  <span className="font-medium">Find Rides</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFormData({ ...formData, role: 'driver' })}
-                  className={`p-4 rounded-xl border-2 transition-all ${
-                    formData.role === 'driver'
-                      ? 'border-blue-600 bg-blue-50'
-                      : 'border-gray-200 hover:border-gray-300'
-                  }`}
-                  data-testid="driver-role-btn"
-                >
-                  <Car className="w-6 h-6 mx-auto mb-2 text-blue-600" />
-                  <span className="font-medium">Offer Rides</span>
-                </button>
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">I want to</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setFormData({ ...formData, role: 'rider' })}
+                    className={`p-4 rounded-xl border-2 transition-all ${
+                      formData.role === 'rider'
+                        ? 'border-blue-600 bg-blue-50'
+                        : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                    data-testid="rider-role-btn"
+                  >
+                    <Users className="w-6 h-6 mx-auto mb-2 text-blue-600" />
+                    <span className="font-medium">Find Rides</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFormData({ ...formData, role: 'driver' })}
+                    className={`p-4 rounded-xl border-2 transition-all ${
+                      formData.role === 'driver'
+                        ? 'border-blue-600 bg-blue-50'
+                        : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                    data-testid="driver-role-btn"
+                  >
+                    <Car className="w-6 h-6 mx-auto mb-2 text-blue-600" />
+                    <span className="font-medium">Offer Rides</span>
+                  </button>
+                </div>
               </div>
-            </div>
+
+              {/* Academic Info */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <GraduationCap className="w-4 h-4 inline mr-1" />
+                    Branch
+                  </label>
+                  <select
+                    value={formData.branch}
+                    onChange={(e) => setFormData({ ...formData, branch: e.target.value })}
+                    className="input-field"
+                    data-testid="branch-select"
+                  >
+                    <option value="">Select branch</option>
+                    {academicOptions.branches.map((b) => (
+                      <option key={b} value={b}>{b}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    <BookOpen className="w-4 h-4 inline mr-1" />
+                    Year
+                  </label>
+                  <select
+                    value={formData.academicYear}
+                    onChange={(e) => setFormData({ ...formData, academicYear: e.target.value })}
+                    className="input-field"
+                    data-testid="year-select"
+                  >
+                    <option value="">Select year</option>
+                    {academicOptions.academic_years.map((y) => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </>
           )}
 
           <button
@@ -477,6 +776,7 @@ const RideCard = ({ ride, onRequest, userRole, showRequestBtn = true }) => {
   return (
     <div className={`card hover:shadow-md transition-shadow ${ride.isRecommended ? 'ring-2 ring-green-500' : ''}`} data-testid={`ride-card-${ride.id}`}>
       <div className="flex flex-wrap gap-2 mb-3">
+        {ride.eventTag && <EventTagBadge eventTag={ride.eventTag} />}
         {ride.isRecommended && (
           <Badge variant="recommended">
             <Star className="w-3 h-3 inline mr-1" />
@@ -523,6 +823,12 @@ const RideCard = ({ ride, onRequest, userRole, showRequestBtn = true }) => {
             <span>Pickup: {ride.pickupPoint}</span>
           </div>
         )}
+        {ride.distanceKm && (
+          <div className="flex items-center gap-2 text-gray-600">
+            <MapPin className="w-4 h-4" />
+            <span>{ride.distanceKm} km</span>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between pt-3 border-t border-gray-100">
@@ -532,6 +838,11 @@ const RideCard = ({ ride, onRequest, userRole, showRequestBtn = true }) => {
           </div>
           <div>
             <span className="text-sm text-gray-700 block">{ride.driverName}</span>
+            {(ride.driverBranch || ride.driverYear) && (
+              <span className="text-xs text-gray-500">
+                {ride.driverBranch}{ride.driverBranch && ride.driverYear ? ' • ' : ''}{ride.driverYear}
+              </span>
+            )}
             {ride.driverTrust && (
               <TrustBadge trust={ride.driverTrust} size="sm" />
             )}
@@ -567,15 +878,19 @@ const RideCard = ({ ride, onRequest, userRole, showRequestBtn = true }) => {
   );
 };
 
-// Ride Search/Filter Component
-const RideSearch = ({ onSearch, pickupPoints }) => {
+// Ride Search/Filter Component with Community Filters
+const RideSearch = ({ onSearch, pickupPoints, eventTags, academicOptions }) => {
   const [filters, setFilters] = useState({
     source: '',
     destination: '',
     timeWindowStart: '',
-    timeWindowEnd: ''
+    timeWindowEnd: '',
+    eventTag: '',
+    branch: '',
+    academicYear: ''
   });
   const [showFilters, setShowFilters] = useState(false);
+  const [showCommunity, setShowCommunity] = useState(false);
 
   const handleSearch = () => {
     onSearch(filters);
@@ -586,7 +901,10 @@ const RideSearch = ({ onSearch, pickupPoints }) => {
       source: '',
       destination: '',
       timeWindowStart: '',
-      timeWindowEnd: ''
+      timeWindowEnd: '',
+      eventTag: '',
+      branch: '',
+      academicYear: ''
     });
     onSearch({});
   };
@@ -598,14 +916,26 @@ const RideSearch = ({ onSearch, pickupPoints }) => {
           <Search className="w-5 h-5 text-blue-600" />
           Find Rides
         </h3>
-        <button
-          onClick={() => setShowFilters(!showFilters)}
-          className="flex items-center gap-1 text-blue-600 text-sm font-medium"
-          data-testid="toggle-filters-btn"
-        >
-          <Filter className="w-4 h-4" />
-          {showFilters ? 'Hide' : 'Show'} Filters
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowCommunity(!showCommunity)}
+            className={`flex items-center gap-1 text-sm font-medium px-3 py-1 rounded-full ${
+              showCommunity ? 'bg-purple-100 text-purple-700' : 'text-purple-600 hover:bg-purple-50'
+            }`}
+            data-testid="toggle-community-btn"
+          >
+            <Users className="w-4 h-4" />
+            Community
+          </button>
+          <button
+            onClick={() => setShowFilters(!showFilters)}
+            className="flex items-center gap-1 text-blue-600 text-sm font-medium"
+            data-testid="toggle-filters-btn"
+          >
+            <Filter className="w-4 h-4" />
+            {showFilters ? 'Hide' : 'More'} Filters
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -632,6 +962,88 @@ const RideSearch = ({ onSearch, pickupPoints }) => {
           />
         </div>
       </div>
+
+      {/* Event Tag Filter */}
+      {eventTags && eventTags.length > 0 && (
+        <div className="mt-4">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            <Tag className="w-4 h-4 inline mr-1" />
+            Filter by Event
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => setFilters({ ...filters, eventTag: '' })}
+              className={`px-3 py-1 rounded-full text-sm border transition-colors ${
+                !filters.eventTag 
+                  ? 'bg-blue-100 border-blue-300 text-blue-700' 
+                  : 'border-gray-200 hover:border-gray-300'
+              }`}
+              data-testid="event-all-btn"
+            >
+              All Events
+            </button>
+            {eventTags.map((tag) => (
+              <button
+                key={tag.id}
+                onClick={() => setFilters({ ...filters, eventTag: tag.id })}
+                className={`px-3 py-1 rounded-full text-sm border transition-colors ${
+                  filters.eventTag === tag.id 
+                    ? 'border-2' 
+                    : 'border-gray-200 hover:border-gray-300'
+                }`}
+                style={filters.eventTag === tag.id ? { 
+                  backgroundColor: `${tag.color}20`, 
+                  borderColor: tag.color,
+                  color: tag.color
+                } : {}}
+                data-testid={`event-filter-${tag.id}`}
+              >
+                {tag.icon} {tag.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Community Filters */}
+      {showCommunity && (
+        <div className="mt-4 p-4 bg-purple-50 rounded-lg border border-purple-200">
+          <h4 className="font-medium text-purple-800 mb-3 flex items-center gap-2">
+            <GraduationCap className="w-4 h-4" />
+            Find Rides from Your Community
+          </h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+              <select
+                value={filters.branch}
+                onChange={(e) => setFilters({ ...filters, branch: e.target.value })}
+                className="input-field"
+                data-testid="filter-branch-select"
+              >
+                <option value="">All Branches</option>
+                {academicOptions?.branches?.map((b) => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Academic Year</label>
+              <select
+                value={filters.academicYear}
+                onChange={(e) => setFilters({ ...filters, academicYear: e.target.value })}
+                className="input-field"
+                data-testid="filter-year-select"
+              >
+                <option value="">All Years</option>
+                {academicOptions?.academic_years?.map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showFilters && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 pt-4 border-t border-gray-100">
@@ -685,8 +1097,8 @@ const RideSearch = ({ onSearch, pickupPoints }) => {
   );
 };
 
-// Post Ride Form
-const PostRideForm = ({ pickupPoints, onSubmit, onCancel }) => {
+// Post Ride Form with Event Tag
+const PostRideForm = ({ pickupPoints, eventTags, onSubmit, onCancel }) => {
   const [formData, setFormData] = useState({
     source: '',
     destination: '',
@@ -695,7 +1107,9 @@ const PostRideForm = ({ pickupPoints, onSubmit, onCancel }) => {
     estimatedCost: '',
     pickupPoint: '',
     isRecurring: false,
-    recurrencePattern: ''
+    recurrencePattern: '',
+    eventTag: '',
+    distanceKm: ''
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -713,7 +1127,9 @@ const PostRideForm = ({ pickupPoints, onSubmit, onCancel }) => {
         estimated_cost: parseFloat(formData.estimatedCost),
         pickup_point: formData.pickupPoint || null,
         is_recurring: formData.isRecurring,
-        recurrence_pattern: formData.isRecurring ? formData.recurrencePattern : null
+        recurrence_pattern: formData.isRecurring ? formData.recurrencePattern : null,
+        event_tag: formData.eventTag || null,
+        distance_km: formData.distanceKm ? parseFloat(formData.distanceKm) : null
       };
       await onSubmit(data);
     } catch (err) {
@@ -795,7 +1211,7 @@ const PostRideForm = ({ pickupPoints, onSubmit, onCancel }) => {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Available Seats *</label>
             <input
@@ -823,7 +1239,67 @@ const PostRideForm = ({ pickupPoints, onSubmit, onCancel }) => {
               data-testid="ride-cost-input"
             />
           </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              <MapPin className="w-4 h-4 inline mr-1" />
+              Distance (km)
+            </label>
+            <input
+              type="number"
+              min="0"
+              step="0.1"
+              value={formData.distanceKm}
+              onChange={(e) => setFormData({ ...formData, distanceKm: e.target.value })}
+              className="input-field"
+              placeholder="Approx distance"
+              data-testid="ride-distance-input"
+            />
+          </div>
         </div>
+
+        {/* Event Tag Selection */}
+        {eventTags && eventTags.length > 0 && (
+          <div className="p-4 bg-indigo-50 rounded-lg border border-indigo-100">
+            <label className="block text-sm font-medium text-indigo-800 mb-3">
+              <Tag className="w-4 h-4 inline mr-1" />
+              Tag this ride with an event (optional)
+            </label>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setFormData({ ...formData, eventTag: '' })}
+                className={`px-3 py-2 rounded-lg border-2 transition-all ${
+                  !formData.eventTag 
+                    ? 'border-indigo-600 bg-indigo-100 text-indigo-700' 
+                    : 'border-gray-200 hover:border-gray-300'
+                }`}
+                data-testid="event-none-btn"
+              >
+                No Event
+              </button>
+              {eventTags.map((tag) => (
+                <button
+                  key={tag.id}
+                  type="button"
+                  onClick={() => setFormData({ ...formData, eventTag: tag.id })}
+                  className={`px-3 py-2 rounded-lg border-2 transition-all ${
+                    formData.eventTag === tag.id 
+                      ? 'border-2' 
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                  style={formData.eventTag === tag.id ? {
+                    backgroundColor: `${tag.color}20`,
+                    borderColor: tag.color,
+                    color: tag.color
+                  } : {}}
+                  data-testid={`event-select-${tag.id}`}
+                >
+                  {tag.icon} {tag.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Recurring Ride Options */}
         <div className="p-4 bg-purple-50 rounded-lg border border-purple-100">
@@ -935,6 +1411,11 @@ const RequestCard = ({ request, onAccept, onReject, isDriverView = false, onRate
           {isDriverView ? (
             <div>
               <p className="font-medium text-gray-900">{request.riderName}</p>
+              {(request.riderBranch || request.riderYear) && (
+                <p className="text-xs text-gray-500">
+                  {request.riderBranch}{request.riderBranch && request.riderYear ? ' • ' : ''}{request.riderYear}
+                </p>
+              )}
               {request.riderTrust && (
                 <TrustBadge trust={request.riderTrust} size="sm" />
               )}
@@ -1046,6 +1527,12 @@ const HistoryCard = ({ ride }) => {
           <Clock className="w-4 h-4" />
           <span>{format(departureTime, 'MMM d, yyyy h:mm a')}</span>
         </div>
+        {ride.distanceKm && (
+          <div className="flex items-center gap-2">
+            <MapPin className="w-4 h-4" />
+            <span>{ride.distanceKm} km</span>
+          </div>
+        )}
         {ride.role === 'driver' && (
           <div className="flex items-center gap-2">
             <Users className="w-4 h-4" />
@@ -1063,54 +1550,172 @@ const HistoryCard = ({ ride }) => {
   );
 };
 
-// User Profile Card Component
-const ProfileCard = ({ user, onLogout }) => {
+// User Profile Card Component with Badges
+const ProfileCard = ({ user, onLogout, onUpdateProfile }) => {
+  const [editing, setEditing] = useState(false);
+  const [academicOptions, setAcademicOptions] = useState({ branches: [], academic_years: [] });
+  const [formData, setFormData] = useState({
+    branch: user.branch || '',
+    academicYear: user.academicYear || ''
+  });
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const fetchOptions = async () => {
+      try {
+        const response = await api.get('/api/academic-options');
+        setAcademicOptions(response.data);
+      } catch (err) {
+        console.error('Failed to fetch academic options:', err);
+      }
+    };
+    fetchOptions();
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onUpdateProfile(formData);
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div className="card" data-testid="profile-card">
-      <div className="flex items-center gap-4 mb-6">
-        <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center">
-          <User className="w-8 h-8 text-blue-600" />
+    <div className="space-y-6" data-testid="profile-card">
+      <div className="card">
+        <div className="flex items-center gap-4 mb-6">
+          <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center">
+            <User className="w-8 h-8 text-blue-600" />
+          </div>
+          <div>
+            <h2 className="text-xl font-bold text-gray-900">{user.name}</h2>
+            <p className="text-gray-600 capitalize">{user.role}</p>
+            {(user.branch || user.academicYear) && (
+              <p className="text-sm text-gray-500">
+                {user.branch}{user.branch && user.academicYear ? ' • ' : ''}{user.academicYear}
+              </p>
+            )}
+          </div>
         </div>
-        <div>
-          <h2 className="text-xl font-bold text-gray-900">{user.name}</h2>
-          <p className="text-gray-600 capitalize">{user.role}</p>
-        </div>
-      </div>
 
-      {user.avgRating !== undefined && (
-        <div className="grid grid-cols-3 gap-4 mb-6">
-          <div className="text-center p-3 bg-gray-50 rounded-lg">
-            <div className="flex items-center justify-center gap-1 mb-1">
-              <Star className="w-5 h-5 text-yellow-500 fill-yellow-500" />
-              <span className="text-xl font-bold text-gray-900">{user.avgRating || '-'}</span>
+        {/* Badges */}
+        {user.badges && user.badges.length > 0 && (
+          <div className="mb-6">
+            <h3 className="text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
+              <Trophy className="w-4 h-4 text-amber-500" />
+              Your Badges
+            </h3>
+            <UserBadgeDisplay badges={user.badges} />
+          </div>
+        )}
+
+        {/* Streak */}
+        {user.streak && user.streak.currentStreak > 0 && (
+          <div className="mb-6">
+            <StreakDisplay streak={user.streak} />
+          </div>
+        )}
+
+        {user.avgRating !== undefined && (
+          <div className="grid grid-cols-3 gap-4 mb-6">
+            <div className="text-center p-3 bg-gray-50 rounded-lg">
+              <div className="flex items-center justify-center gap-1 mb-1">
+                <Star className="w-5 h-5 text-yellow-500 fill-yellow-500" />
+                <span className="text-xl font-bold text-gray-900">{user.avgRating || '-'}</span>
+              </div>
+              <p className="text-xs text-gray-500">Rating</p>
             </div>
-            <p className="text-xs text-gray-500">Rating</p>
+            <div className="text-center p-3 bg-gray-50 rounded-lg">
+              <div className="text-xl font-bold text-gray-900">{user.totalRides || 0}</div>
+              <p className="text-xs text-gray-500">Rides</p>
+            </div>
+            <div className="text-center p-3 bg-gray-50 rounded-lg">
+              <div className="text-xl font-bold text-gray-900">{user.ratingCount || 0}</div>
+              <p className="text-xs text-gray-500">Reviews</p>
+            </div>
           </div>
-          <div className="text-center p-3 bg-gray-50 rounded-lg">
-            <div className="text-xl font-bold text-gray-900">{user.totalRides || 0}</div>
-            <p className="text-xs text-gray-500">Rides</p>
-          </div>
-          <div className="text-center p-3 bg-gray-50 rounded-lg">
-            <div className="text-xl font-bold text-gray-900">{user.ratingCount || 0}</div>
-            <p className="text-xs text-gray-500">Reviews</p>
-          </div>
-        </div>
-      )}
+        )}
 
-      {user.trustLabel && (
-        <div className="mb-6">
-          <TrustBadge trust={user} showRating={false} />
-        </div>
-      )}
+        {user.trustLabel && (
+          <div className="mb-6">
+            <TrustBadge trust={user} showRating={false} />
+          </div>
+        )}
 
-      <button
-        onClick={onLogout}
-        className="w-full btn-secondary flex items-center justify-center gap-2"
-        data-testid="profile-logout-btn"
-      >
-        <LogOut className="w-5 h-5" />
-        Logout
-      </button>
+        {/* Academic Info Editor */}
+        {editing ? (
+          <div className="space-y-4 mb-6 p-4 bg-gray-50 rounded-lg">
+            <h3 className="font-medium text-gray-900">Edit Academic Info</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+                <select
+                  value={formData.branch}
+                  onChange={(e) => setFormData({ ...formData, branch: e.target.value })}
+                  className="input-field"
+                  data-testid="edit-branch-select"
+                >
+                  <option value="">Select branch</option>
+                  {academicOptions.branches.map((b) => (
+                    <option key={b} value={b}>{b}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Year</label>
+                <select
+                  value={formData.academicYear}
+                  onChange={(e) => setFormData({ ...formData, academicYear: e.target.value })}
+                  className="input-field"
+                  data-testid="edit-year-select"
+                >
+                  <option value="">Select year</option>
+                  {academicOptions.academic_years.map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="btn-primary"
+                data-testid="save-profile-btn"
+              >
+                {saving ? 'Saving...' : 'Save'}
+              </button>
+              <button
+                onClick={() => setEditing(false)}
+                className="btn-secondary"
+                data-testid="cancel-edit-btn"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditing(true)}
+            className="w-full btn-secondary mb-4 flex items-center justify-center gap-2"
+            data-testid="edit-profile-btn"
+          >
+            <GraduationCap className="w-5 h-5" />
+            Edit Academic Info
+          </button>
+        )}
+
+        <button
+          onClick={onLogout}
+          className="w-full btn-secondary flex items-center justify-center gap-2 text-red-600 border-red-200 hover:bg-red-50"
+          data-testid="profile-logout-btn"
+        >
+          <LogOut className="w-5 h-5" />
+          Logout
+        </button>
+      </div>
     </div>
   );
 };
@@ -1118,12 +1723,14 @@ const ProfileCard = ({ user, onLogout }) => {
 // Main App Component
 function App() {
   const auth = useAuth();
-  const [view, setView] = useState('rides'); // rides, myRides, requests, post, history, profile
+  const [view, setView] = useState('rides'); // rides, myRides, requests, post, history, profile, stats
   const [rides, setRides] = useState([]);
   const [myRides, setMyRides] = useState([]);
   const [myRequests, setMyRequests] = useState([]);
   const [history, setHistory] = useState([]);
   const [pickupPoints, setPickupPoints] = useState([]);
+  const [eventTags, setEventTags] = useState([]);
+  const [academicOptions, setAcademicOptions] = useState({ branches: [], academic_years: [] });
   const [loading, setLoading] = useState(false);
   const [notification, setNotification] = useState(null);
   
@@ -1144,6 +1751,26 @@ function App() {
     }
   }, []);
 
+  // Fetch event tags
+  const fetchEventTags = useCallback(async () => {
+    try {
+      const response = await api.get('/api/event-tags');
+      setEventTags(response.data.event_tags);
+    } catch (err) {
+      console.error('Failed to fetch event tags:', err);
+    }
+  }, []);
+
+  // Fetch academic options
+  const fetchAcademicOptions = useCallback(async () => {
+    try {
+      const response = await api.get('/api/academic-options');
+      setAcademicOptions(response.data);
+    } catch (err) {
+      console.error('Failed to fetch academic options:', err);
+    }
+  }, []);
+
   // Fetch all rides
   const fetchRides = useCallback(async (filters = {}) => {
     setLoading(true);
@@ -1153,6 +1780,9 @@ function App() {
       if (filters.destination) params.append('destination', filters.destination);
       if (filters.timeWindowStart) params.append('time_window_start', new Date(filters.timeWindowStart).toISOString());
       if (filters.timeWindowEnd) params.append('time_window_end', new Date(filters.timeWindowEnd).toISOString());
+      if (filters.eventTag) params.append('event_tag', filters.eventTag);
+      if (filters.branch) params.append('branch', filters.branch);
+      if (filters.academicYear) params.append('academic_year', filters.academicYear);
       
       const response = await api.get(`/api/rides?${params.toString()}`);
       setRides(response.data.rides);
@@ -1284,6 +1914,20 @@ function App() {
     }
   };
 
+  // Update profile
+  const updateProfile = async (profileData) => {
+    try {
+      await api.patch('/api/auth/profile', {
+        branch: profileData.branch || null,
+        academic_year: profileData.academicYear || null
+      });
+      showNotification('Profile updated!');
+      auth.fetchUserInfo();
+    } catch (err) {
+      showNotification(err.response?.data?.detail || 'Failed to update profile', 'error');
+    }
+  };
+
   // Open rating modal
   const openRatingModal = (rideId, userToRate) => {
     setRatingModal({
@@ -1294,9 +1938,9 @@ function App() {
   };
 
   // Auth handlers
-  const handleLogin = async (email, password, name, role, isSignup = false) => {
+  const handleLogin = async (email, password, name, role, branch, academicYear, isSignup = false) => {
     if (isSignup) {
-      await auth.signup(email, password, name, role);
+      await auth.signup(email, password, name, role, branch, academicYear);
     } else {
       await auth.login(email, password);
     }
@@ -1306,6 +1950,8 @@ function App() {
   useEffect(() => {
     if (auth.user) {
       fetchPickupPoints();
+      fetchEventTags();
+      fetchAcademicOptions();
       fetchRides();
       if (auth.user.role === 'driver') {
         fetchMyRides();
@@ -1313,7 +1959,7 @@ function App() {
         fetchMyRequests();
       }
     }
-  }, [auth.user, fetchPickupPoints, fetchRides, fetchMyRides, fetchMyRequests]);
+  }, [auth.user, fetchPickupPoints, fetchEventTags, fetchAcademicOptions, fetchRides, fetchMyRides, fetchMyRequests]);
 
   if (auth.loading) {
     return <LoadingSpinner />;
@@ -1435,6 +2081,17 @@ function App() {
             )}
 
             <button
+              onClick={() => { setView('stats'); }}
+              className={`px-4 py-3 font-medium transition-colors border-b-2 whitespace-nowrap ${
+                view === 'stats' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+              data-testid="nav-stats"
+            >
+              <BarChart3 className="w-4 h-4 inline mr-2" />
+              Insights
+            </button>
+
+            <button
               onClick={() => { setView('history'); fetchHistory(); }}
               className={`px-4 py-3 font-medium transition-colors border-b-2 whitespace-nowrap ${
                 view === 'history' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -1464,7 +2121,12 @@ function App() {
         {/* Find Rides View */}
         {view === 'rides' && (
           <div>
-            <RideSearch onSearch={fetchRides} pickupPoints={pickupPoints} />
+            <RideSearch 
+              onSearch={fetchRides} 
+              pickupPoints={pickupPoints}
+              eventTags={eventTags}
+              academicOptions={academicOptions}
+            />
             
             {loading ? (
               <LoadingSpinner />
@@ -1569,9 +2231,15 @@ function App() {
         {view === 'post' && auth.user.role === 'driver' && (
           <PostRideForm
             pickupPoints={pickupPoints}
+            eventTags={eventTags}
             onSubmit={postRide}
             onCancel={() => setView('myRides')}
           />
+        )}
+
+        {/* Statistics/Insights View */}
+        {view === 'stats' && (
+          <StatisticsDashboard user={auth.user} />
         )}
 
         {/* History View */}
@@ -1601,7 +2269,11 @@ function App() {
         {/* Profile View */}
         {view === 'profile' && (
           <div className="max-w-md mx-auto">
-            <ProfileCard user={auth.user} onLogout={auth.logout} />
+            <ProfileCard 
+              user={auth.user} 
+              onLogout={auth.logout}
+              onUpdateProfile={updateProfile}
+            />
           </div>
         )}
       </main>
@@ -1641,6 +2313,7 @@ const DriverRideCard = ({ ride, onAccept, onReject, onUpdateStatus, onRate }) =>
   return (
     <div className="card" data-testid={`driver-ride-card-${ride.id}`}>
       <div className="flex flex-wrap gap-2 mb-3">
+        {ride.eventTag && <EventTagBadge eventTag={ride.eventTag} />}
         {ride.isRecurring && (
           <Badge variant="recurring">
             <Repeat className="w-3 h-3 inline mr-1" />
@@ -1680,6 +2353,12 @@ const DriverRideCard = ({ ride, onAccept, onReject, onUpdateStatus, onRate }) =>
           <div className="flex items-center gap-2 text-gray-600 col-span-2">
             <Navigation className="w-4 h-4" />
             <span>Pickup: {ride.pickupPoint}</span>
+          </div>
+        )}
+        {ride.distanceKm && (
+          <div className="flex items-center gap-2 text-gray-600">
+            <MapPin className="w-4 h-4" />
+            <span>{ride.distanceKm} km</span>
           </div>
         )}
       </div>
