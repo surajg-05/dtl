@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from motor.motor_asyncio import AsyncIOMotorClient
 import bcrypt
 import jwt
@@ -14,6 +14,12 @@ from contextlib import asynccontextmanager
 MONGO_URL = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 JWT_SECRET = os.environ.get('JWT_SECRET', 'campuspool_secret_key_2024')
 JWT_ALGORITHM = 'HS256'
+
+# Trust thresholds
+TRUSTED_RATING_THRESHOLD = 4.5
+TRUSTED_MIN_RIDES = 10
+NEW_USER_MAX_RIDES = 3
+LOW_RATING_THRESHOLD = 3.0
 
 # Predefined pickup points for campus
 PICKUP_POINTS = [
@@ -47,6 +53,9 @@ async def lifespan(app: FastAPI):
     await db.rides.create_index([("source", "text"), ("destination", "text")])
     await db.ride_requests.create_index("ride_id")
     await db.ride_requests.create_index("is_urgent")
+    await db.ratings.create_index([("ride_id", 1), ("rater_id", 1)], unique=True)
+    await db.ratings.create_index("rated_user_id")
+    await db.safe_completions.create_index("ride_id")
     print("Database connected and indexes created")
     yield
     client.close()
@@ -94,6 +103,15 @@ class RideRequestCreate(BaseModel):
     ride_id: str
     is_urgent: bool = False
 
+class RatingCreate(BaseModel):
+    ride_id: str
+    rated_user_id: str
+    rating: int = Field(..., ge=1, le=5)
+    feedback: Optional[str] = None
+
+class SafeCompletionCreate(BaseModel):
+    ride_id: str
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -109,7 +127,7 @@ def verify_password(password: str, hashed: str) -> bool:
 def create_token(user_id: str) -> str:
     payload = {
         "user_id": user_id,
-        "exp": datetime.utcnow() + timedelta(days=7)
+        "exp": datetime.now(timezone.utc) + timedelta(days=7)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -190,6 +208,44 @@ async def generate_recurring_rides(ride_data: dict, user_id: str, pattern: str):
     
     return len(rides_to_create)
 
+async def get_user_trust_info(user_id: str) -> dict:
+    """Calculate trust information for a user"""
+    # Get completed rides count (as driver or rider)
+    driver_rides = await db.rides.count_documents({"driver_id": user_id, "status": "completed"})
+    rider_requests = await db.ride_requests.count_documents({"rider_id": user_id, "status": "accepted"})
+    total_rides = driver_rides + rider_requests
+    
+    # Get average rating
+    pipeline = [
+        {"$match": {"rated_user_id": user_id}},
+        {"$group": {"_id": None, "avgRating": {"$avg": "$rating"}, "count": {"$sum": 1}}}
+    ]
+    rating_result = await db.ratings.aggregate(pipeline).to_list(1)
+    
+    avg_rating = 0
+    rating_count = 0
+    if rating_result:
+        avg_rating = round(rating_result[0]["avgRating"], 1)
+        rating_count = rating_result[0]["count"]
+    
+    # Determine trust label
+    trust_label = "new_user"
+    if total_rides < NEW_USER_MAX_RIDES:
+        trust_label = "new_user"
+    elif rating_count > 0 and avg_rating < LOW_RATING_THRESHOLD:
+        trust_label = "low_rating"
+    elif total_rides >= TRUSTED_MIN_RIDES and avg_rating >= TRUSTED_RATING_THRESHOLD:
+        trust_label = "trusted"
+    elif total_rides >= NEW_USER_MAX_RIDES:
+        trust_label = "regular"
+    
+    return {
+        "totalRides": total_rides,
+        "avgRating": avg_rating,
+        "ratingCount": rating_count,
+        "trustLabel": trust_label
+    }
+
 # API Routes
 
 @app.get("/api/health")
@@ -215,8 +271,8 @@ async def signup(user_data: UserSignup):
         "password_hash": hash_password(user_data.password),
         "name": user_data.name,
         "role": user_data.role,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
     }
     
     await db.users.insert_one(user)
@@ -252,11 +308,30 @@ async def login(credentials: UserLogin):
 
 @app.get("/api/auth/me")
 async def get_current_user_info(user: dict = Depends(get_current_user)):
+    trust_info = await get_user_trust_info(user["id"])
     return {
         "id": user["id"],
         "email": user["email"],
         "name": user["name"],
-        "role": user["role"]
+        "role": user["role"],
+        **trust_info
+    }
+
+# User Profile Routes
+@app.get("/api/users/{user_id}/profile")
+async def get_user_profile(user_id: str):
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    trust_info = await get_user_trust_info(user_id)
+    
+    return {
+        "id": user["id"],
+        "name": user["name"],
+        "role": user["role"],
+        "createdAt": user["created_at"].isoformat() if user.get("created_at") else None,
+        **trust_info
     }
 
 # Rides Routes
@@ -286,8 +361,8 @@ async def create_ride(ride_data: RideCreate, user: dict = Depends(get_current_us
         "recurrence_pattern": ride_data.recurrence_pattern,
         "parent_ride_id": None,
         "status": "posted",
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
     }
     
     await db.rides.insert_one(ride)
@@ -316,7 +391,7 @@ async def get_rides(
     query = {
         "status": "posted",
         "available_seats": {"$gt": 0},
-        "departure_time": {"$gte": datetime.utcnow()}
+        "departure_time": {"$gte": datetime.now(timezone.utc)}
     }
     
     # Time window filtering
@@ -351,16 +426,20 @@ async def get_rides(
         for ride in rides:
             ride["recommendation_score"] = 0
     
-    # Calculate cost per rider and format response
+    # Calculate cost per rider and format response with driver trust info
     formatted_rides = []
     for ride in rides:
         occupied = ride["total_seats"] - ride["available_seats"]
         cost_per_rider = ride["estimated_cost"] / max(occupied, 1)
         
+        # Get driver trust info
+        driver_trust = await get_user_trust_info(ride["driver_id"])
+        
         formatted_rides.append({
             "id": ride["id"],
             "driverId": ride["driver_id"],
             "driverName": ride["driver_name"],
+            "driverTrust": driver_trust,
             "source": ride["source"],
             "destination": ride["destination"],
             "departureTime": ride["departure_time"].isoformat(),
@@ -391,10 +470,32 @@ async def get_ride(ride_id: str):
     occupied = ride["total_seats"] - ride["available_seats"]
     cost_per_rider = ride["estimated_cost"] / max(occupied, 1)
     
+    # Get driver trust info
+    driver_trust = await get_user_trust_info(ride["driver_id"])
+    
+    # Get safe completion status
+    safe_completion = await db.safe_completions.find_one({"ride_id": ride_id})
+    
+    # Get accepted riders
+    accepted_requests = await db.ride_requests.find({
+        "ride_id": ride_id,
+        "status": "accepted"
+    }).to_list(100)
+    
+    riders = []
+    for req in accepted_requests:
+        rider_trust = await get_user_trust_info(req["rider_id"])
+        riders.append({
+            "id": req["rider_id"],
+            "name": req["rider_name"],
+            "trust": rider_trust
+        })
+    
     return {
         "id": ride["id"],
         "driverId": ride["driver_id"],
         "driverName": ride["driver_name"],
+        "driverTrust": driver_trust,
         "source": ride["source"],
         "destination": ride["destination"],
         "departureTime": ride["departure_time"].isoformat(),
@@ -405,7 +506,13 @@ async def get_ride(ride_id: str):
         "pickupPoint": ride.get("pickup_point"),
         "isRecurring": ride.get("is_recurring", False),
         "recurrencePattern": ride.get("recurrence_pattern"),
-        "status": ride["status"]
+        "status": ride["status"],
+        "safeCompletion": {
+            "confirmed": safe_completion is not None,
+            "confirmedAt": safe_completion["confirmed_at"].isoformat() if safe_completion else None,
+            "confirmedBy": safe_completion["confirmed_by"] if safe_completion else None
+        } if ride["status"] == "completed" else None,
+        "riders": riders
     }
 
 @app.get("/api/rides/driver/my-rides")
@@ -423,6 +530,26 @@ async def get_driver_rides(authorization: str = None):
         occupied = ride["total_seats"] - ride["available_seats"]
         cost_per_rider = ride["estimated_cost"] / max(occupied, 1)
         
+        # Check for pending ratings
+        pending_ratings = []
+        if ride["status"] == "completed":
+            accepted_requests = await db.ride_requests.find({
+                "ride_id": ride["id"],
+                "status": "accepted"
+            }).to_list(100)
+            
+            for req in accepted_requests:
+                existing_rating = await db.ratings.find_one({
+                    "ride_id": ride["id"],
+                    "rater_id": user["id"],
+                    "rated_user_id": req["rider_id"]
+                })
+                if not existing_rating:
+                    pending_ratings.append({
+                        "userId": req["rider_id"],
+                        "userName": req["rider_name"]
+                    })
+        
         formatted_rides.append({
             "id": ride["id"],
             "driverId": ride["driver_id"],
@@ -437,7 +564,8 @@ async def get_driver_rides(authorization: str = None):
             "pickupPoint": ride.get("pickup_point"),
             "isRecurring": ride.get("is_recurring", False),
             "recurrencePattern": ride.get("recurrence_pattern"),
-            "status": ride["status"]
+            "status": ride["status"],
+            "pendingRatings": pending_ratings
         })
     
     return {"rides": formatted_rides}
@@ -458,7 +586,7 @@ async def update_ride_status(ride_id: str, status: str, authorization: str = Non
     
     await db.rides.update_one(
         {"id": ride_id},
-        {"$set": {"status": status, "updated_at": datetime.utcnow()}}
+        {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}}
     )
     
     return {"message": "Ride status updated successfully"}
@@ -481,7 +609,7 @@ async def create_ride_request(request_data: RideRequestCreate, authorization: st
     
     # Check if urgent request is within active time window (2 hours)
     if request_data.is_urgent:
-        time_until_departure = (ride["departure_time"] - datetime.utcnow()).total_seconds() / 3600
+        time_until_departure = (ride["departure_time"] - datetime.now(timezone.utc)).total_seconds() / 3600
         if time_until_departure > 2:
             raise HTTPException(
                 status_code=400, 
@@ -504,8 +632,8 @@ async def create_ride_request(request_data: RideRequestCreate, authorization: st
         "rider_name": user["name"],
         "is_urgent": request_data.is_urgent,
         "status": "pending",
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
     }
     
     await db.ride_requests.insert_one(ride_request)
@@ -541,17 +669,21 @@ async def get_ride_requests(ride_id: str, authorization: str = None):
     ])
     requests = await cursor.to_list(length=100)
     
-    return {
-        "requests": [{
+    result = []
+    for req in requests:
+        rider_trust = await get_user_trust_info(req["rider_id"])
+        result.append({
             "id": req["id"],
             "rideId": req["ride_id"],
             "riderId": req["rider_id"],
             "riderName": req["rider_name"],
+            "riderTrust": rider_trust,
             "isUrgent": req.get("is_urgent", False),
             "status": req["status"],
             "createdAt": req["created_at"].isoformat()
-        } for req in requests]
-    }
+        })
+    
+    return {"requests": result}
 
 @app.get("/api/requests/my-requests")
 async def get_my_requests(authorization: str = None):
@@ -565,6 +697,26 @@ async def get_my_requests(authorization: str = None):
     for req in requests:
         ride = await db.rides.find_one({"id": req["ride_id"]})
         if ride:
+            # Check for pending rating (rider rates driver)
+            pending_rating = None
+            if req["status"] == "accepted" and ride["status"] == "completed":
+                existing_rating = await db.ratings.find_one({
+                    "ride_id": ride["id"],
+                    "rater_id": user["id"],
+                    "rated_user_id": ride["driver_id"]
+                })
+                if not existing_rating:
+                    pending_rating = {
+                        "userId": ride["driver_id"],
+                        "userName": ride["driver_name"]
+                    }
+            
+            # Check safe completion
+            safe_completion = await db.safe_completions.find_one({
+                "ride_id": ride["id"],
+                "confirmed_by": user["id"]
+            })
+            
             result.append({
                 "id": req["id"],
                 "rideId": req["ride_id"],
@@ -576,8 +728,13 @@ async def get_my_requests(authorization: str = None):
                     "destination": ride["destination"],
                     "departureTime": ride["departure_time"].isoformat(),
                     "driverName": ride["driver_name"],
-                    "pickupPoint": ride.get("pickup_point")
-                }
+                    "driverId": ride["driver_id"],
+                    "pickupPoint": ride.get("pickup_point"),
+                    "status": ride["status"],
+                    "estimatedCost": ride["estimated_cost"]
+                },
+                "pendingRating": pending_rating,
+                "safelyConfirmed": safe_completion is not None
             })
     
     return {"requests": result}
@@ -600,13 +757,13 @@ async def accept_request(request_id: str, authorization: str = None):
     # Update request status
     await db.ride_requests.update_one(
         {"id": request_id},
-        {"$set": {"status": "accepted", "updated_at": datetime.utcnow()}}
+        {"$set": {"status": "accepted", "updated_at": datetime.now(timezone.utc)}}
     )
     
     # Decrease available seats
     await db.rides.update_one(
         {"id": request["ride_id"]},
-        {"$inc": {"available_seats": -1}, "$set": {"updated_at": datetime.utcnow()}}
+        {"$inc": {"available_seats": -1}, "$set": {"updated_at": datetime.now(timezone.utc)}}
     )
     
     return {"message": "Request accepted successfully"}
@@ -625,10 +782,252 @@ async def reject_request(request_id: str, authorization: str = None):
     
     await db.ride_requests.update_one(
         {"id": request_id},
-        {"$set": {"status": "rejected", "updated_at": datetime.utcnow()}}
+        {"$set": {"status": "rejected", "updated_at": datetime.now(timezone.utc)}}
     )
     
     return {"message": "Request rejected successfully"}
+
+# Rating Routes
+@app.post("/api/ratings")
+async def create_rating(rating_data: RatingCreate, authorization: str = None):
+    user = await get_current_user(authorization)
+    
+    # Verify ride exists and is completed
+    ride = await db.rides.find_one({"id": rating_data.ride_id})
+    if not ride:
+        raise HTTPException(status_code=404, detail="Ride not found")
+    
+    if ride["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Can only rate completed rides")
+    
+    # Verify user was part of this ride
+    is_driver = ride["driver_id"] == user["id"]
+    is_rider = await db.ride_requests.find_one({
+        "ride_id": rating_data.ride_id,
+        "rider_id": user["id"],
+        "status": "accepted"
+    })
+    
+    if not is_driver and not is_rider:
+        raise HTTPException(status_code=403, detail="You were not part of this ride")
+    
+    # Verify rated user was part of ride
+    rated_is_driver = ride["driver_id"] == rating_data.rated_user_id
+    rated_is_rider = await db.ride_requests.find_one({
+        "ride_id": rating_data.ride_id,
+        "rider_id": rating_data.rated_user_id,
+        "status": "accepted"
+    })
+    
+    if not rated_is_driver and not rated_is_rider:
+        raise HTTPException(status_code=400, detail="Rated user was not part of this ride")
+    
+    # Can't rate yourself
+    if user["id"] == rating_data.rated_user_id:
+        raise HTTPException(status_code=400, detail="Cannot rate yourself")
+    
+    # Check for existing rating
+    existing = await db.ratings.find_one({
+        "ride_id": rating_data.ride_id,
+        "rater_id": user["id"],
+        "rated_user_id": rating_data.rated_user_id
+    })
+    if existing:
+        raise HTTPException(status_code=409, detail="You already rated this user for this ride")
+    
+    rating_id = str(uuid.uuid4())
+    rating = {
+        "id": rating_id,
+        "ride_id": rating_data.ride_id,
+        "rater_id": user["id"],
+        "rater_name": user["name"],
+        "rated_user_id": rating_data.rated_user_id,
+        "rating": rating_data.rating,
+        "feedback": rating_data.feedback,
+        "created_at": datetime.now(timezone.utc)
+    }
+    
+    await db.ratings.insert_one(rating)
+    
+    return {"message": "Rating submitted successfully", "rating_id": rating_id}
+
+@app.get("/api/ratings/user/{user_id}")
+async def get_user_ratings(user_id: str):
+    """Get aggregated rating info for a user (no individual feedback exposed)"""
+    pipeline = [
+        {"$match": {"rated_user_id": user_id}},
+        {"$group": {
+            "_id": None,
+            "avgRating": {"$avg": "$rating"},
+            "count": {"$sum": 1},
+            "stars": {
+                "$push": "$rating"
+            }
+        }}
+    ]
+    result = await db.ratings.aggregate(pipeline).to_list(1)
+    
+    if not result:
+        return {
+            "avgRating": 0,
+            "totalRatings": 0,
+            "distribution": {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+        }
+    
+    # Calculate distribution
+    distribution = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+    for star in result[0]["stars"]:
+        distribution[star] = distribution.get(star, 0) + 1
+    
+    return {
+        "avgRating": round(result[0]["avgRating"], 1),
+        "totalRatings": result[0]["count"],
+        "distribution": distribution
+    }
+
+# Safe Completion Routes
+@app.post("/api/safe-completion")
+async def confirm_safe_completion(data: SafeCompletionCreate, authorization: str = None):
+    user = await get_current_user(authorization)
+    
+    # Verify ride exists
+    ride = await db.rides.find_one({"id": data.ride_id})
+    if not ride:
+        raise HTTPException(status_code=404, detail="Ride not found")
+    
+    # Only riders can confirm safe completion
+    ride_request = await db.ride_requests.find_one({
+        "ride_id": data.ride_id,
+        "rider_id": user["id"],
+        "status": "accepted"
+    })
+    if not ride_request:
+        raise HTTPException(status_code=403, detail="Only accepted riders can confirm safe completion")
+    
+    # Check if already confirmed
+    existing = await db.safe_completions.find_one({
+        "ride_id": data.ride_id,
+        "confirmed_by": user["id"]
+    })
+    if existing:
+        raise HTTPException(status_code=409, detail="You already confirmed safe completion")
+    
+    completion_id = str(uuid.uuid4())
+    safe_completion = {
+        "id": completion_id,
+        "ride_id": data.ride_id,
+        "confirmed_by": user["id"],
+        "confirmed_by_name": user["name"],
+        "confirmed_at": datetime.now(timezone.utc)
+    }
+    
+    await db.safe_completions.insert_one(safe_completion)
+    
+    return {"message": "Safe completion confirmed", "completion_id": completion_id}
+
+@app.get("/api/safe-completion/ride/{ride_id}")
+async def get_ride_safe_completions(ride_id: str, authorization: str = None):
+    await get_current_user(authorization)
+    
+    cursor = db.safe_completions.find({"ride_id": ride_id})
+    completions = await cursor.to_list(100)
+    
+    return {
+        "completions": [{
+            "id": c["id"],
+            "confirmedBy": c["confirmed_by"],
+            "confirmedByName": c["confirmed_by_name"],
+            "confirmedAt": c["confirmed_at"].isoformat()
+        } for c in completions]
+    }
+
+# Ride History Routes
+@app.get("/api/history/driver")
+async def get_driver_history(authorization: str = None):
+    user = await get_current_user(authorization)
+    
+    if user["role"] != "driver":
+        raise HTTPException(status_code=403, detail="Only drivers can access this")
+    
+    # Get all completed and cancelled rides
+    cursor = db.rides.find({
+        "driver_id": user["id"],
+        "status": {"$in": ["completed", "cancelled"]}
+    }).sort("departure_time", -1)
+    rides = await cursor.to_list(length=100)
+    
+    history = []
+    for ride in rides:
+        # Get accepted riders
+        accepted_requests = await db.ride_requests.find({
+            "ride_id": ride["id"],
+            "status": "accepted"
+        }).to_list(100)
+        
+        riders_count = len(accepted_requests)
+        actual_cost = ride["estimated_cost"] / max(riders_count, 1) if riders_count > 0 else ride["estimated_cost"]
+        
+        # Get safe completions
+        safe_completions = await db.safe_completions.count_documents({"ride_id": ride["id"]})
+        
+        history.append({
+            "id": ride["id"],
+            "source": ride["source"],
+            "destination": ride["destination"],
+            "departureTime": ride["departure_time"].isoformat(),
+            "status": ride["status"],
+            "totalSeats": ride["total_seats"],
+            "ridersCount": riders_count,
+            "estimatedCost": ride["estimated_cost"],
+            "actualCostPerRider": round(actual_cost, 2),
+            "safeCompletions": safe_completions,
+            "role": "driver"
+        })
+    
+    return {"history": history}
+
+@app.get("/api/history/rider")
+async def get_rider_history(authorization: str = None):
+    user = await get_current_user(authorization)
+    
+    # Get all accepted requests where ride is completed or cancelled
+    cursor = db.ride_requests.find({
+        "rider_id": user["id"],
+        "status": "accepted"
+    }).sort("created_at", -1)
+    requests = await cursor.to_list(length=100)
+    
+    history = []
+    for req in requests:
+        ride = await db.rides.find_one({"id": req["ride_id"]})
+        if ride and ride["status"] in ["completed", "cancelled"]:
+            # Calculate cost
+            accepted_count = await db.ride_requests.count_documents({
+                "ride_id": ride["id"],
+                "status": "accepted"
+            })
+            cost_per_rider = ride["estimated_cost"] / max(accepted_count, 1)
+            
+            # Check safe completion
+            safe_completion = await db.safe_completions.find_one({
+                "ride_id": ride["id"],
+                "confirmed_by": user["id"]
+            })
+            
+            history.append({
+                "id": ride["id"],
+                "source": ride["source"],
+                "destination": ride["destination"],
+                "departureTime": ride["departure_time"].isoformat(),
+                "status": ride["status"],
+                "driverName": ride["driver_name"],
+                "driverId": ride["driver_id"],
+                "costPaid": round(cost_per_rider, 2),
+                "safelyConfirmed": safe_completion is not None,
+                "role": "rider"
+            })
+    
+    return {"history": history}
 
 # Admin/Stats Routes
 @app.get("/api/stats")
@@ -639,14 +1038,20 @@ async def get_stats(authorization: str = None):
     total_rides = await db.rides.count_documents({})
     total_requests = await db.ride_requests.count_documents({})
     active_rides = await db.rides.count_documents({"status": "posted"})
+    completed_rides = await db.rides.count_documents({"status": "completed"})
     urgent_requests = await db.ride_requests.count_documents({"is_urgent": True, "status": "pending"})
+    total_ratings = await db.ratings.count_documents({})
+    safe_completions = await db.safe_completions.count_documents({})
     
     return {
         "totalUsers": total_users,
         "totalRides": total_rides,
         "totalRequests": total_requests,
         "activeRides": active_rides,
-        "urgentPendingRequests": urgent_requests
+        "completedRides": completed_rides,
+        "urgentPendingRequests": urgent_requests,
+        "totalRatings": total_ratings,
+        "safeCompletions": safe_completions
     }
 
 if __name__ == "__main__":
