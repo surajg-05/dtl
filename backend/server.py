@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Header
+from fastapi import FastAPI, HTTPException, Depends, status, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, List
@@ -86,6 +86,15 @@ BADGE_DEFINITIONS = [
     {"id": "money_saver", "name": "Money Saver", "description": "Saved $100 on rides", "icon": "💰", "requirement": 100, "type": "savings"}
 ]
 
+# Report categories
+REPORT_CATEGORIES = ["safety", "behavior", "misuse", "fraud", "other"]
+
+# SOS Status types
+SOS_STATUSES = ["active", "under_review", "resolved"]
+
+# User action types for admin
+ADMIN_ACTION_TYPES = ["warn", "suspend", "disable", "enable", "revoke_verification", "verify"]
+
 # Database client
 client = None
 db = None
@@ -108,6 +117,14 @@ async def lifespan(app: FastAPI):
     await db.safe_completions.create_index("ride_id")
     await db.user_streaks.create_index("user_id")
     await db.custom_events.create_index("created_by")
+    # Admin specific indexes
+    await db.admin_audit_logs.create_index("admin_id")
+    await db.admin_audit_logs.create_index("created_at")
+    await db.sos_events.create_index("ride_id")
+    await db.sos_events.create_index("status")
+    await db.reports.create_index("status")
+    await db.reports.create_index("category")
+    await db.user_verifications.create_index("user_id")
     print("Database connected and indexes created")
     yield
     client.close()
@@ -183,6 +200,35 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     user: dict
 
+# Admin-specific Pydantic Models
+class SOSEventCreate(BaseModel):
+    ride_id: str
+    description: str = Field(..., min_length=5)
+    location: Optional[str] = None
+
+class SOSStatusUpdate(BaseModel):
+    status: str = Field(..., pattern="^(active|under_review|resolved)$")
+    admin_note: Optional[str] = None
+
+class ReportCreate(BaseModel):
+    target_type: str = Field(..., pattern="^(user|ride)$")
+    target_id: str
+    category: str = Field(..., pattern="^(safety|behavior|misuse|fraud|other)$")
+    description: str = Field(..., min_length=10)
+
+class ReportStatusUpdate(BaseModel):
+    status: str = Field(..., pattern="^(pending|under_review|resolved|dismissed)$")
+    action_taken: Optional[str] = None
+    admin_note: Optional[str] = None
+
+class UserActionRequest(BaseModel):
+    action: str = Field(..., pattern="^(warn|suspend|disable|enable)$")
+    reason: Optional[str] = None
+
+class VerificationRequest(BaseModel):
+    action: str = Field(..., pattern="^(verify|revoke)$")
+    reason: Optional[str] = None
+
 # Helper functions
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -207,11 +253,37 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         user = await db.users.find_one({"id": payload["user_id"]})
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        # Check if user is disabled
+        if user.get("is_disabled", False):
+            raise HTTPException(status_code=403, detail="Your account has been disabled. Contact support.")
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+async def get_admin_user(authorization: Optional[str] = Header(None)):
+    """Get current user and verify they have admin role"""
+    user = await get_current_user(authorization)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+async def log_admin_action(admin_id: str, admin_name: str, action_type: str, target_type: str, 
+                          target_id: str, details: str = None):
+    """Log an admin action for audit purposes"""
+    log_entry = {
+        "id": str(uuid.uuid4()),
+        "admin_id": admin_id,
+        "admin_name": admin_name,
+        "action_type": action_type,
+        "target_type": target_type,
+        "target_id": target_id,
+        "details": details,
+        "created_at": datetime.now(timezone.utc)
+    }
+    await db.admin_audit_logs.insert_one(log_entry)
+    return log_entry
 
 def calculate_route_similarity(ride_source: str, ride_dest: str, search_source: str, search_dest: str) -> int:
     """Calculate similarity score between ride route and search criteria"""
@@ -553,6 +625,13 @@ async def create_event_tag(tag_data: EventTagCreate, user: dict = Depends(get_cu
     }
     
     await db.custom_events.insert_one(new_tag)
+    
+    # Log admin action
+    await log_admin_action(
+        user["id"], user["name"], "create_event_tag", "event_tag", tag_id,
+        f"Created event tag: {tag_data.name}"
+    )
+    
     return {"message": "Event tag created", "tag": new_tag}
 
 @app.get("/api/academic-options")
@@ -579,6 +658,10 @@ async def signup(user_data: UserSignup):
         "role": user_data.role,
         "branch": user_data.branch,
         "academic_year": user_data.academic_year,
+        "is_verified": False,
+        "is_disabled": False,
+        "is_suspended": False,
+        "warnings": [],
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc)
     }
@@ -603,6 +686,10 @@ async def login(credentials: UserLogin):
     user = await db.users.find_one({"email": credentials.email})
     if not user or not verify_password(credentials.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Check if user is disabled
+    if user.get("is_disabled", False):
+        raise HTTPException(status_code=403, detail="Your account has been disabled. Contact support.")
     
     token = create_token(user["id"])
     
@@ -632,6 +719,9 @@ async def get_current_user_info(user: dict = Depends(get_current_user)):
         "role": user["role"],
         "branch": user.get("branch"),
         "academicYear": user.get("academic_year"),
+        "isVerified": user.get("is_verified", False),
+        "isDisabled": user.get("is_disabled", False),
+        "isSuspended": user.get("is_suspended", False),
         **trust_info,
         "statistics": stats,
         "streak": streak,
@@ -686,6 +776,7 @@ async def get_user_profile(user_id: str, current_user: dict = Depends(get_curren
         "role": user["role"],
         "branch": user.get("branch"),
         "academicYear": user.get("academic_year"),
+        "isVerified": user.get("is_verified", False),
         "createdAt": user["created_at"].isoformat() if user.get("created_at") else None,
         **trust_info,
         "badges": badges[:5],  # Show top 5 badges
@@ -1479,7 +1570,790 @@ async def get_rider_history(authorization: str = None):
     
     return {"history": history}
 
-# Admin/Stats Routes
+# =============================================================================
+# ADMIN ROUTES - Phase 8: Admin, Moderation & Governance
+# =============================================================================
+
+# --- SOS Events Routes ---
+@app.post("/api/sos")
+async def create_sos_event(sos_data: SOSEventCreate, user: dict = Depends(get_current_user)):
+    """Create an SOS/Emergency event for a ride"""
+    ride = await db.rides.find_one({"id": sos_data.ride_id})
+    if not ride:
+        raise HTTPException(status_code=404, detail="Ride not found")
+    
+    # Check user is part of the ride
+    is_driver = ride["driver_id"] == user["id"]
+    is_rider = await db.ride_requests.find_one({
+        "ride_id": sos_data.ride_id,
+        "rider_id": user["id"],
+        "status": "accepted"
+    })
+    
+    if not is_driver and not is_rider:
+        raise HTTPException(status_code=403, detail="You are not part of this ride")
+    
+    sos_id = str(uuid.uuid4())
+    sos_event = {
+        "id": sos_id,
+        "ride_id": sos_data.ride_id,
+        "reporter_id": user["id"],
+        "reporter_name": user["name"],
+        "description": sos_data.description,
+        "location": sos_data.location,
+        "status": "active",
+        "admin_notes": [],
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
+    }
+    
+    await db.sos_events.insert_one(sos_event)
+    
+    return {"message": "SOS event created", "sos_id": sos_id}
+
+@app.get("/api/sos/my-events")
+async def get_my_sos_events(user: dict = Depends(get_current_user)):
+    """Get SOS events created by the current user"""
+    cursor = db.sos_events.find({"reporter_id": user["id"]}).sort("created_at", -1)
+    events = await cursor.to_list(100)
+    
+    result = []
+    for event in events:
+        ride = await db.rides.find_one({"id": event["ride_id"]})
+        result.append({
+            "id": event["id"],
+            "rideId": event["ride_id"],
+            "description": event["description"],
+            "location": event.get("location"),
+            "status": event["status"],
+            "createdAt": event["created_at"].isoformat(),
+            "ride": {
+                "source": ride["source"] if ride else "N/A",
+                "destination": ride["destination"] if ride else "N/A"
+            } if ride else None
+        })
+    
+    return {"events": result}
+
+# --- Report Routes ---
+@app.post("/api/reports")
+async def create_report(report_data: ReportCreate, user: dict = Depends(get_current_user)):
+    """Submit a report against a user or ride"""
+    # Validate target exists
+    if report_data.target_type == "user":
+        target = await db.users.find_one({"id": report_data.target_id})
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+    else:
+        target = await db.rides.find_one({"id": report_data.target_id})
+        if not target:
+            raise HTTPException(status_code=404, detail="Ride not found")
+    
+    report_id = str(uuid.uuid4())
+    report = {
+        "id": report_id,
+        "reporter_id": user["id"],
+        "reporter_name": user["name"],
+        "target_type": report_data.target_type,
+        "target_id": report_data.target_id,
+        "category": report_data.category,
+        "description": report_data.description,
+        "status": "pending",
+        "action_taken": None,
+        "admin_note": None,
+        "reviewed_by": None,
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
+    }
+    
+    await db.reports.insert_one(report)
+    
+    return {"message": "Report submitted successfully", "report_id": report_id}
+
+@app.get("/api/reports/my-reports")
+async def get_my_reports(user: dict = Depends(get_current_user)):
+    """Get reports submitted by the current user"""
+    cursor = db.reports.find({"reporter_id": user["id"]}).sort("created_at", -1)
+    reports = await cursor.to_list(100)
+    
+    result = []
+    for report in reports:
+        result.append({
+            "id": report["id"],
+            "targetType": report["target_type"],
+            "targetId": report["target_id"],
+            "category": report["category"],
+            "description": report["description"],
+            "status": report["status"],
+            "createdAt": report["created_at"].isoformat()
+        })
+    
+    return {"reports": result}
+
+# --- Admin User Management Routes ---
+@app.get("/api/admin/users")
+async def admin_get_users(
+    admin: dict = Depends(get_admin_user),
+    role: Optional[str] = None,
+    is_verified: Optional[bool] = None,
+    is_disabled: Optional[bool] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """Get all users with optional filters (Admin only)"""
+    query = {}
+    
+    if role:
+        query["role"] = role
+    if is_verified is not None:
+        query["is_verified"] = is_verified
+    if is_disabled is not None:
+        query["is_disabled"] = is_disabled
+    if search:
+        query["$or"] = [
+            {"name": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}}
+        ]
+    
+    total = await db.users.count_documents(query)
+    cursor = db.users.find(query).sort("created_at", -1).skip(offset).limit(limit)
+    users = await cursor.to_list(length=limit)
+    
+    result = []
+    for user in users:
+        trust_info = await get_user_trust_info(user["id"])
+        stats = await calculate_user_statistics(user["id"])
+        result.append({
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "role": user["role"],
+            "branch": user.get("branch"),
+            "academicYear": user.get("academic_year"),
+            "isVerified": user.get("is_verified", False),
+            "isDisabled": user.get("is_disabled", False),
+            "isSuspended": user.get("is_suspended", False),
+            "warningsCount": len(user.get("warnings", [])),
+            "createdAt": user["created_at"].isoformat() if user.get("created_at") else None,
+            "trustInfo": trust_info,
+            "statistics": stats
+        })
+    
+    return {
+        "users": result,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+@app.get("/api/admin/users/{user_id}")
+async def admin_get_user_details(user_id: str, admin: dict = Depends(get_admin_user)):
+    """Get detailed user information (Admin only)"""
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    trust_info = await get_user_trust_info(user_id)
+    stats = await calculate_user_statistics(user_id)
+    badges = await get_user_badges(user_id)
+    
+    # Get verification history
+    verifications = await db.user_verifications.find({"user_id": user_id}).sort("created_at", -1).to_list(50)
+    
+    # Get reports against this user
+    reports_against = await db.reports.find({
+        "target_type": "user",
+        "target_id": user_id
+    }).sort("created_at", -1).to_list(50)
+    
+    # Get SOS events involving this user
+    sos_events = await db.sos_events.find({"reporter_id": user_id}).sort("created_at", -1).to_list(50)
+    
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "role": user["role"],
+        "branch": user.get("branch"),
+        "academicYear": user.get("academic_year"),
+        "isVerified": user.get("is_verified", False),
+        "isDisabled": user.get("is_disabled", False),
+        "isSuspended": user.get("is_suspended", False),
+        "warnings": user.get("warnings", []),
+        "createdAt": user["created_at"].isoformat() if user.get("created_at") else None,
+        "updatedAt": user["updated_at"].isoformat() if user.get("updated_at") else None,
+        "trustInfo": trust_info,
+        "statistics": stats,
+        "badges": badges,
+        "verificationHistory": [{
+            "id": v["id"],
+            "action": v["action"],
+            "adminName": v["admin_name"],
+            "reason": v.get("reason"),
+            "createdAt": v["created_at"].isoformat()
+        } for v in verifications],
+        "reportsAgainst": [{
+            "id": r["id"],
+            "category": r["category"],
+            "description": r["description"],
+            "status": r["status"],
+            "createdAt": r["created_at"].isoformat()
+        } for r in reports_against],
+        "sosEvents": [{
+            "id": e["id"],
+            "rideId": e["ride_id"],
+            "status": e["status"],
+            "createdAt": e["created_at"].isoformat()
+        } for e in sos_events]
+    }
+
+@app.post("/api/admin/users/{user_id}/action")
+async def admin_user_action(user_id: str, action_data: UserActionRequest, admin: dict = Depends(get_admin_user)):
+    """Take action on a user (warn, suspend, disable, enable) - Admin only"""
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    update_fields = {"updated_at": datetime.now(timezone.utc)}
+    action_details = action_data.reason or "No reason provided"
+    
+    if action_data.action == "warn":
+        warning = {
+            "id": str(uuid.uuid4()),
+            "admin_id": admin["id"],
+            "admin_name": admin["name"],
+            "reason": action_data.reason,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.users.update_one(
+            {"id": user_id},
+            {"$push": {"warnings": warning}, "$set": update_fields}
+        )
+    elif action_data.action == "suspend":
+        update_fields["is_suspended"] = True
+        await db.users.update_one({"id": user_id}, {"$set": update_fields})
+    elif action_data.action == "disable":
+        update_fields["is_disabled"] = True
+        await db.users.update_one({"id": user_id}, {"$set": update_fields})
+    elif action_data.action == "enable":
+        update_fields["is_disabled"] = False
+        update_fields["is_suspended"] = False
+        await db.users.update_one({"id": user_id}, {"$set": update_fields})
+    
+    # Log the admin action
+    await log_admin_action(
+        admin["id"], admin["name"], action_data.action, "user", user_id, action_details
+    )
+    
+    return {"message": f"User {action_data.action} action completed successfully"}
+
+@app.post("/api/admin/users/{user_id}/verification")
+async def admin_user_verification(user_id: str, verify_data: VerificationRequest, admin: dict = Depends(get_admin_user)):
+    """Verify or revoke verification for a user - Admin only"""
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    is_verified = verify_data.action == "verify"
+    
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"is_verified": is_verified, "updated_at": datetime.now(timezone.utc)}}
+    )
+    
+    # Create verification history record
+    verification_record = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "action": verify_data.action,
+        "admin_id": admin["id"],
+        "admin_name": admin["name"],
+        "reason": verify_data.reason,
+        "created_at": datetime.now(timezone.utc)
+    }
+    await db.user_verifications.insert_one(verification_record)
+    
+    # Log the admin action
+    await log_admin_action(
+        admin["id"], admin["name"], verify_data.action, "user", user_id,
+        verify_data.reason or f"Verification {verify_data.action}"
+    )
+    
+    return {"message": f"User verification {verify_data.action} completed"}
+
+# --- Admin Ride Monitoring Routes ---
+@app.get("/api/admin/rides")
+async def admin_get_rides(
+    admin: dict = Depends(get_admin_user),
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    driver_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """Get all rides with filters (Admin only)"""
+    query = {}
+    
+    if status:
+        query["status"] = status
+    if driver_id:
+        query["driver_id"] = driver_id
+    if date_from:
+        try:
+            start = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+            query.setdefault("departure_time", {})["$gte"] = start
+        except:
+            pass
+    if date_to:
+        try:
+            end = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+            query.setdefault("departure_time", {})["$lte"] = end
+        except:
+            pass
+    
+    total = await db.rides.count_documents(query)
+    cursor = db.rides.find(query).sort("departure_time", -1).skip(offset).limit(limit)
+    rides = await cursor.to_list(length=limit)
+    
+    result = []
+    for ride in rides:
+        # Get participants count
+        participants_count = await db.ride_requests.count_documents({
+            "ride_id": ride["id"],
+            "status": "accepted"
+        })
+        
+        result.append({
+            "id": ride["id"],
+            "driverId": ride["driver_id"],
+            "driverName": ride["driver_name"],
+            "source": ride["source"],
+            "destination": ride["destination"],
+            "departureTime": ride["departure_time"].isoformat(),
+            "status": ride["status"],
+            "totalSeats": ride["total_seats"],
+            "availableSeats": ride["available_seats"],
+            "participantsCount": participants_count,
+            "estimatedCost": ride["estimated_cost"],
+            "createdAt": ride["created_at"].isoformat() if ride.get("created_at") else None
+        })
+    
+    return {
+        "rides": result,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+@app.get("/api/admin/rides/abnormal")
+async def admin_get_abnormal_rides(admin: dict = Depends(get_admin_user)):
+    """Get rides with abnormal patterns (frequently cancelled drivers) - Admin only"""
+    # Find drivers with high cancellation rates
+    pipeline = [
+        {"$group": {
+            "_id": "$driver_id",
+            "total": {"$sum": 1},
+            "cancelled": {"$sum": {"$cond": [{"$eq": ["$status", "cancelled"]}, 1, 0]}}
+        }},
+        {"$match": {
+            "total": {"$gte": 3},
+            "$expr": {"$gte": [{"$divide": ["$cancelled", "$total"]}, 0.5]}
+        }},
+        {"$sort": {"cancelled": -1}},
+        {"$limit": 50}
+    ]
+    
+    results = await db.rides.aggregate(pipeline).to_list(50)
+    
+    abnormal_drivers = []
+    for r in results:
+        user = await db.users.find_one({"id": r["_id"]})
+        if user:
+            abnormal_drivers.append({
+                "driverId": r["_id"],
+                "driverName": user["name"],
+                "totalRides": r["total"],
+                "cancelledRides": r["cancelled"],
+                "cancellationRate": round(r["cancelled"] / r["total"] * 100, 1)
+            })
+    
+    return {"abnormalDrivers": abnormal_drivers}
+
+@app.get("/api/admin/rides/{ride_id}")
+async def admin_get_ride_details(ride_id: str, admin: dict = Depends(get_admin_user)):
+    """Get detailed ride information (Admin only)"""
+    ride = await db.rides.find_one({"id": ride_id})
+    if not ride:
+        raise HTTPException(status_code=404, detail="Ride not found")
+    
+    # Get driver info
+    driver = await db.users.find_one({"id": ride["driver_id"]})
+    driver_trust = await get_user_trust_info(ride["driver_id"])
+    
+    # Get all requests for this ride
+    requests = await db.ride_requests.find({"ride_id": ride_id}).to_list(100)
+    
+    # Get safe completions
+    safe_completions = await db.safe_completions.find({"ride_id": ride_id}).to_list(100)
+    
+    # Get SOS events
+    sos_events = await db.sos_events.find({"ride_id": ride_id}).to_list(100)
+    
+    # Get reports for this ride
+    reports = await db.reports.find({
+        "target_type": "ride",
+        "target_id": ride_id
+    }).to_list(100)
+    
+    return {
+        "id": ride["id"],
+        "driver": {
+            "id": driver["id"],
+            "name": driver["name"],
+            "email": driver["email"],
+            "trustInfo": driver_trust
+        } if driver else None,
+        "source": ride["source"],
+        "destination": ride["destination"],
+        "departureTime": ride["departure_time"].isoformat(),
+        "status": ride["status"],
+        "totalSeats": ride["total_seats"],
+        "availableSeats": ride["available_seats"],
+        "estimatedCost": ride["estimated_cost"],
+        "pickupPoint": ride.get("pickup_point"),
+        "distanceKm": ride.get("distance_km"),
+        "createdAt": ride["created_at"].isoformat() if ride.get("created_at") else None,
+        "requests": [{
+            "id": r["id"],
+            "riderId": r["rider_id"],
+            "riderName": r["rider_name"],
+            "status": r["status"],
+            "isUrgent": r.get("is_urgent", False),
+            "createdAt": r["created_at"].isoformat()
+        } for r in requests],
+        "safeCompletions": [{
+            "id": s["id"],
+            "confirmedBy": s["confirmed_by"],
+            "confirmedByName": s["confirmed_by_name"],
+            "confirmedAt": s["confirmed_at"].isoformat()
+        } for s in safe_completions],
+        "sosEvents": [{
+            "id": e["id"],
+            "reporterName": e["reporter_name"],
+            "description": e["description"],
+            "status": e["status"],
+            "createdAt": e["created_at"].isoformat()
+        } for e in sos_events],
+        "reports": [{
+            "id": r["id"],
+            "category": r["category"],
+            "description": r["description"],
+            "status": r["status"],
+            "createdAt": r["created_at"].isoformat()
+        } for r in reports]
+    }
+
+# --- Admin SOS Management Routes ---
+@app.get("/api/admin/sos")
+async def admin_get_sos_events(
+    admin: dict = Depends(get_admin_user),
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """Get all SOS events (Admin only)"""
+    query = {}
+    if status:
+        query["status"] = status
+    
+    total = await db.sos_events.count_documents(query)
+    cursor = db.sos_events.find(query).sort("created_at", -1).skip(offset).limit(limit)
+    events = await cursor.to_list(length=limit)
+    
+    result = []
+    for event in events:
+        ride = await db.rides.find_one({"id": event["ride_id"]})
+        result.append({
+            "id": event["id"],
+            "rideId": event["ride_id"],
+            "reporterId": event["reporter_id"],
+            "reporterName": event["reporter_name"],
+            "description": event["description"],
+            "location": event.get("location"),
+            "status": event["status"],
+            "adminNotes": event.get("admin_notes", []),
+            "createdAt": event["created_at"].isoformat(),
+            "ride": {
+                "source": ride["source"],
+                "destination": ride["destination"],
+                "driverName": ride["driver_name"],
+                "status": ride["status"]
+            } if ride else None
+        })
+    
+    return {
+        "events": result,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+@app.patch("/api/admin/sos/{sos_id}")
+async def admin_update_sos(sos_id: str, update_data: SOSStatusUpdate, admin: dict = Depends(get_admin_user)):
+    """Update SOS event status and add notes (Admin only)"""
+    event = await db.sos_events.find_one({"id": sos_id})
+    if not event:
+        raise HTTPException(status_code=404, detail="SOS event not found")
+    
+    update_fields = {
+        "status": update_data.status,
+        "updated_at": datetime.now(timezone.utc)
+    }
+    
+    # Add admin note if provided
+    if update_data.admin_note:
+        admin_note = {
+            "admin_id": admin["id"],
+            "admin_name": admin["name"],
+            "note": update_data.admin_note,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.sos_events.update_one(
+            {"id": sos_id},
+            {"$push": {"admin_notes": admin_note}, "$set": update_fields}
+        )
+    else:
+        await db.sos_events.update_one({"id": sos_id}, {"$set": update_fields})
+    
+    # Log admin action
+    await log_admin_action(
+        admin["id"], admin["name"], f"sos_status_update_{update_data.status}",
+        "sos_event", sos_id, update_data.admin_note
+    )
+    
+    return {"message": "SOS event updated successfully"}
+
+# --- Admin Report Management Routes ---
+@app.get("/api/admin/reports")
+async def admin_get_reports(
+    admin: dict = Depends(get_admin_user),
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """Get all reports (Admin only)"""
+    query = {}
+    if status:
+        query["status"] = status
+    if category:
+        query["category"] = category
+    
+    total = await db.reports.count_documents(query)
+    cursor = db.reports.find(query).sort("created_at", -1).skip(offset).limit(limit)
+    reports = await cursor.to_list(length=limit)
+    
+    result = []
+    for report in reports:
+        # Get target info
+        target_info = None
+        if report["target_type"] == "user":
+            target = await db.users.find_one({"id": report["target_id"]})
+            if target:
+                target_info = {"name": target["name"], "email": target["email"]}
+        else:
+            target = await db.rides.find_one({"id": report["target_id"]})
+            if target:
+                target_info = {
+                    "source": target["source"],
+                    "destination": target["destination"],
+                    "driverName": target["driver_name"]
+                }
+        
+        result.append({
+            "id": report["id"],
+            "reporterId": report["reporter_id"],
+            "reporterName": report["reporter_name"],
+            "targetType": report["target_type"],
+            "targetId": report["target_id"],
+            "targetInfo": target_info,
+            "category": report["category"],
+            "description": report["description"],
+            "status": report["status"],
+            "actionTaken": report.get("action_taken"),
+            "adminNote": report.get("admin_note"),
+            "reviewedBy": report.get("reviewed_by"),
+            "createdAt": report["created_at"].isoformat()
+        })
+    
+    return {
+        "reports": result,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+@app.patch("/api/admin/reports/{report_id}")
+async def admin_update_report(report_id: str, update_data: ReportStatusUpdate, admin: dict = Depends(get_admin_user)):
+    """Update report status (Admin only)"""
+    report = await db.reports.find_one({"id": report_id})
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    update_fields = {
+        "status": update_data.status,
+        "reviewed_by": admin["id"],
+        "updated_at": datetime.now(timezone.utc)
+    }
+    
+    if update_data.action_taken:
+        update_fields["action_taken"] = update_data.action_taken
+    if update_data.admin_note:
+        update_fields["admin_note"] = update_data.admin_note
+    
+    await db.reports.update_one({"id": report_id}, {"$set": update_fields})
+    
+    # Log admin action
+    await log_admin_action(
+        admin["id"], admin["name"], f"report_status_update_{update_data.status}",
+        "report", report_id, f"Action: {update_data.action_taken or 'None'}"
+    )
+    
+    return {"message": "Report updated successfully"}
+
+# --- Admin Analytics Routes ---
+@app.get("/api/admin/analytics")
+async def admin_get_analytics(admin: dict = Depends(get_admin_user)):
+    """Get platform analytics overview (Admin only)"""
+    # User stats
+    total_users = await db.users.count_documents({})
+    verified_users = await db.users.count_documents({"is_verified": True})
+    disabled_users = await db.users.count_documents({"is_disabled": True})
+    drivers = await db.users.count_documents({"role": "driver"})
+    riders = await db.users.count_documents({"role": "rider"})
+    
+    # Ride stats
+    total_rides = await db.rides.count_documents({})
+    active_rides = await db.rides.count_documents({"status": "posted"})
+    completed_rides = await db.rides.count_documents({"status": "completed"})
+    cancelled_rides = await db.rides.count_documents({"status": "cancelled"})
+    
+    # SOS stats
+    total_sos = await db.sos_events.count_documents({})
+    active_sos = await db.sos_events.count_documents({"status": "active"})
+    
+    # Report stats
+    total_reports = await db.reports.count_documents({})
+    pending_reports = await db.reports.count_documents({"status": "pending"})
+    
+    # Rating stats
+    total_ratings = await db.ratings.count_documents({})
+    
+    # Safe completions
+    total_safe_completions = await db.safe_completions.count_documents({})
+    
+    # Calculate global eco impact
+    all_completed = await db.rides.find({"status": "completed"}).to_list(10000)
+    total_distance = sum(r.get("distance_km", AVERAGE_RIDE_DISTANCE_KM) for r in all_completed)
+    total_co2_saved = total_distance * CO2_PER_KM_SOLO * CO2_SAVINGS_FACTOR
+    
+    # Active users (last 7 days)
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    active_drivers_7d = await db.rides.distinct("driver_id", {
+        "created_at": {"$gte": seven_days_ago}
+    })
+    active_riders_7d = await db.ride_requests.distinct("rider_id", {
+        "created_at": {"$gte": seven_days_ago}
+    })
+    active_users_7d = len(set(active_drivers_7d + active_riders_7d))
+    
+    # Active users (last 30 days)
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    active_drivers_30d = await db.rides.distinct("driver_id", {
+        "created_at": {"$gte": thirty_days_ago}
+    })
+    active_riders_30d = await db.ride_requests.distinct("rider_id", {
+        "created_at": {"$gte": thirty_days_ago}
+    })
+    active_users_30d = len(set(active_drivers_30d + active_riders_30d))
+    
+    return {
+        "users": {
+            "total": total_users,
+            "verified": verified_users,
+            "disabled": disabled_users,
+            "drivers": drivers,
+            "riders": riders,
+            "activeUsers7d": active_users_7d,
+            "activeUsers30d": active_users_30d
+        },
+        "rides": {
+            "total": total_rides,
+            "active": active_rides,
+            "completed": completed_rides,
+            "cancelled": cancelled_rides
+        },
+        "safety": {
+            "totalSOS": total_sos,
+            "activeSOS": active_sos,
+            "totalReports": total_reports,
+            "pendingReports": pending_reports,
+            "safeCompletions": total_safe_completions
+        },
+        "engagement": {
+            "totalRatings": total_ratings,
+            "completionRate": round(completed_rides / max(total_rides, 1) * 100, 1)
+        },
+        "ecoImpact": {
+            "totalDistanceKm": round(total_distance, 1),
+            "totalCo2SavedKg": round(total_co2_saved, 2),
+            "treesEquivalent": round(total_co2_saved / 21, 1)
+        }
+    }
+
+# --- Admin Audit Logs Routes ---
+@app.get("/api/admin/audit-logs")
+async def admin_get_audit_logs(
+    admin: dict = Depends(get_admin_user),
+    admin_id: Optional[str] = None,
+    action_type: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    """Get admin audit logs (Admin only)"""
+    query = {}
+    if admin_id:
+        query["admin_id"] = admin_id
+    if action_type:
+        query["action_type"] = action_type
+    
+    total = await db.admin_audit_logs.count_documents(query)
+    cursor = db.admin_audit_logs.find(query).sort("created_at", -1).skip(offset).limit(limit)
+    logs = await cursor.to_list(length=limit)
+    
+    result = []
+    for log in logs:
+        result.append({
+            "id": log["id"],
+            "adminId": log["admin_id"],
+            "adminName": log["admin_name"],
+            "actionType": log["action_type"],
+            "targetType": log["target_type"],
+            "targetId": log["target_id"],
+            "details": log.get("details"),
+            "createdAt": log["created_at"].isoformat()
+        })
+    
+    return {
+        "logs": result,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+# --- Stats Routes (Public) ---
 @app.get("/api/stats")
 async def get_stats(authorization: str = None):
     user = await get_current_user(authorization)
@@ -1518,6 +2392,12 @@ async def get_stats(authorization: str = None):
 async def get_all_badges():
     """Get all available badge definitions"""
     return {"badges": BADGE_DEFINITIONS}
+
+# Report Categories Route
+@app.get("/api/report-categories")
+async def get_report_categories():
+    """Get all available report categories"""
+    return {"categories": REPORT_CATEGORIES}
 
 if __name__ == "__main__":
     import uvicorn
