@@ -251,8 +251,7 @@ async def login(credentials: UserLogin):
     }
 
 @app.get("/api/auth/me")
-async def get_current_user_info(authorization: str = None):
-    user = await get_current_user(authorization)
+async def get_current_user_info(user: dict = Depends(get_current_user)):
     return {
         "id": user["id"],
         "email": user["email"],
@@ -262,8 +261,7 @@ async def get_current_user_info(authorization: str = None):
 
 # Rides Routes
 @app.post("/api/rides")
-async def create_ride(ride_data: RideCreate, authorization: str = None):
-    user = await get_current_user(authorization)
+async def create_ride(ride_data: RideCreate, user: dict = Depends(get_current_user)):
     
     if user["role"] != "driver":
         raise HTTPException(status_code=403, detail="Only drivers can post rides")
